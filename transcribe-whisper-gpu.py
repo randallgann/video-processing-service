@@ -223,7 +223,7 @@ def process_chunk_gpu(chunk_info, model_name="base", language="en", fp16=True):
     
     return result["segments"]
 
-def transcribe_chunks_parallel(chunk_paths, total_length, chunk_length=300, model_name="medium", num_gpus=2):
+def transcribe_chunks_parallel(chunk_paths, total_length, chunk_length=300, model_name="medium", num_gpus=2, progress_file=None):
     """
     Transcribe chunks in parallel using multiple GPUs.
     
@@ -233,10 +233,12 @@ def transcribe_chunks_parallel(chunk_paths, total_length, chunk_length=300, mode
         chunk_length: Length of each chunk in seconds
         model_name: Whisper model name ('base', 'small', 'medium', 'large')
         num_gpus: Number of GPUs to use
+        progress_file: Optional path to a file for writing progress updates
     
     Returns:
         List of transcribed segments with adjusted timestamps
     """
+    global args
     # Check available GPUs
     available_gpus = torch.cuda.device_count()
     if available_gpus == 0:
@@ -261,6 +263,18 @@ def transcribe_chunks_parallel(chunk_paths, total_length, chunk_length=300, mode
     processed_time = 0.0
     
     # Use multiprocessing for parallel processing
+    # Keep track of the number of processed chunks
+    processed_chunks = 0
+    total_chunks = len(chunk_paths)
+    
+    # If progress file is specified, initialize it
+    if args.progress_file:
+        try:
+            with open(args.progress_file, 'w') as f:
+                f.write("0")
+        except Exception as e:
+            print(f"Error initializing progress file: {e}")
+    
     with mp.Pool(processes=num_gpus) as pool:
         # Create a partial function with fixed parameters
         process_fn = partial(process_chunk_gpu, model_name=model_name)
@@ -280,20 +294,44 @@ def transcribe_chunks_parallel(chunk_paths, total_length, chunk_length=300, mode
                 if processed_time > total_length:
                     processed_time = total_length
                 
+                # Increment processed chunks counter
+                processed_chunks += 1
+                
+                # Update progress file if specified
+                if args.progress_file:
+                    try:
+                        with open(args.progress_file, 'w') as f:
+                            f.write(str(processed_chunks))
+                    except Exception as e:
+                        print(f"Error writing to progress file: {e}")
+                
                 progress = min((processed_time / total_length) * 100, 100)
-                print(f"Processed chunk {i+1}/{len(chunk_paths)}. Progress: {progress:.2f}%")
+                print(f"Processed chunk {i+1}/{len(chunk_paths)}. Progress: {progress:.2f}% ({processed_chunks}/{total_chunks} chunks)")
     
     # Sort segments by start time
     all_segments.sort(key=lambda x: x["start"])
     return all_segments
 
-def transcribe_chunks_cpu(chunk_paths, total_length, chunk_length=300, model_name="base"):
+def transcribe_chunks_cpu(chunk_paths, total_length, chunk_length=300, model_name="base", progress_file=None):
     """
     Fallback function to transcribe each chunk using CPU if no GPUs are available.
     """
+    global args
     model = whisper.load_model(model_name)
     all_segments = []
     processed_time = 0.0
+    
+    # Keep track of the number of processed chunks
+    processed_chunks = 0
+    total_chunks = len(chunk_paths)
+    
+    # If progress file is specified, initialize it
+    if args.progress_file:
+        try:
+            with open(args.progress_file, 'w') as f:
+                f.write("0")
+        except Exception as e:
+            print(f"Error initializing progress file: {e}")
 
     for i, chunk_path in enumerate(chunk_paths):
         print(f"Transcribing chunk {i+1}/{len(chunk_paths)}: {chunk_path}")
@@ -311,12 +349,23 @@ def transcribe_chunks_cpu(chunk_paths, total_length, chunk_length=300, model_nam
             # No segments? Assume full chunk length or skip.
             chunk_duration = chunk_length
             
-
+        # Increment processed chunks counter
+        processed_chunks += 1
+        
+        # Update progress file if specified
+        if args.progress_file:
+            try:
+                with open(args.progress_file, 'w') as f:
+                    f.write(str(processed_chunks))
+            except Exception as e:
+                print(f"Error writing to progress file: {e}")
+            
         processed_time += chunk_duration
         if processed_time > total_length:
             processed_time = total_length
+            
         progress = min((processed_time / total_length) * 100, 100)
-        print(f"Processed {processed_time:.2f} sec of {total_length:.2f} sec. Progress: {progress:.2f}%")
+        print(f"Processed {processed_time:.2f} sec of {total_length:.2f} sec. Progress: {progress:.2f}% ({processed_chunks}/{total_chunks} chunks)")
 
         if processed_time >= total_length:
             break
@@ -378,6 +427,12 @@ def main(audio_path, desc_path, max_duration=None, model_name="medium", num_gpus
     print("Splitting audio into chunks...")
     chunk_paths, total_length = split_audio(audio_path, chunk_length=300, max_duration=max_duration)
     
+    # If list-chunks-only is specified, just print the chunks and exit
+    if args.list_chunks_only:
+        for chunk_path in chunk_paths:
+            print(chunk_path)
+        sys.exit(0)
+    
     # 3. Transcribe chunks using parallel GPU processing
     print(f"Starting transcription using {model_name} model...")
     if torch.cuda.is_available():
@@ -386,10 +441,12 @@ def main(audio_path, desc_path, max_duration=None, model_name="medium", num_gpus
         for i in range(torch.cuda.device_count()):
             print(f"GPU {i}: {torch.cuda.get_device_name(i)}")
         all_segments = transcribe_chunks_parallel(chunk_paths, total_length, chunk_length=300, 
-                                                model_name=model_name, num_gpus=num_gpus)
+                                                model_name=model_name, num_gpus=num_gpus, 
+                                                progress_file=args.progress_file)
     else:
         print("No GPUs detected, using CPU (will be much slower)")
-        all_segments = transcribe_chunks_cpu(chunk_paths, total_length, chunk_length=300, model_name=model_name)
+        all_segments = transcribe_chunks_cpu(chunk_paths, total_length, chunk_length=300, 
+                                          model_name=model_name, progress_file=args.progress_file)
 
     # 4. Combine segments into ~1-minute chunks for better vector context
     print("Combining segments into chunks...")
@@ -437,6 +494,7 @@ def main(audio_path, desc_path, max_duration=None, model_name="medium", num_gpus
 if __name__ == "__main__":
     # Parse command line arguments if any
     import argparse
+    import sys
     parser = argparse.ArgumentParser(description="Transcribe audio using GPU-accelerated Whisper")
     parser.add_argument("--audio", type=str, help="Path to audio file")
     parser.add_argument("--desc", type=str, help="Path to description file")
@@ -446,6 +504,8 @@ if __name__ == "__main__":
     parser.add_argument("--gpus", type=int, default=2, help="Number of GPUs to use (default: 2)")
     parser.add_argument("--max-duration", type=float, default=None, 
                         help="Maximum duration to transcribe in seconds (default: full audio)")
+    parser.add_argument("--progress-file", type=str, help="File to write progress updates to")
+    parser.add_argument("--list-chunks-only", action="store_true", help="Only list chunks without processing")
     
     args = parser.parse_args()
     
