@@ -21,6 +21,8 @@ RUN pip3 install --no-cache-dir google-cloud-pubsub google-cloud-storage
 COPY transcribe-whisper-gpu.py /app/
 COPY yt-dlp-aduio-processor-v1.py /app/
 COPY k8s-processor.py /app/
+COPY rag-widget-pubsub-publisher-key.json /app/
+COPY rag-widget-pubsub-subscriber-key.json /app/
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1

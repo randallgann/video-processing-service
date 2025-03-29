@@ -10,3 +10,8 @@ venv
 videos
 graph-rag.py
 rag-widget-3e3a6c02dc68.json
+rag-widget-pubsub-publisher-key.json
+rag-widget-pubsub-subscriber-key.json
+setup-env-vars.ps1
+setup-env-vars.sh
+LOCAL-TESTING.md

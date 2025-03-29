@@ -119,5 +119,11 @@ def download_and_process_audio(url, download_path="./"):
         raise
 
 if __name__ == "__main__":
-    video_url = "https://www.youtube.com/watch?v=00VsIoi0jwo"
+    import sys
+    
+    if len(sys.argv) > 1:
+        video_url = sys.argv[1]
+    else:
+        video_url = "https://www.youtube.com/watch?v=00VsIoi0jwo"  # Default URL
+        
     download_and_process_audio(video_url)

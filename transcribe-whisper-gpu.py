@@ -492,6 +492,9 @@ def main(audio_path, desc_path, max_duration=None, model_name="medium", num_gpus
     print("==================================")
 
 if __name__ == "__main__":
+    # Set multiprocessing start method to 'spawn' for CUDA compatibility
+    mp.set_start_method('spawn')
+    
     # Parse command line arguments if any
     import argparse
     import sys

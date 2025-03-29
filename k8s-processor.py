@@ -34,9 +34,10 @@ def download_video(video_url):
     temp_dir = tempfile.mkdtemp()
     logger.info(f"Downloading video: {video_url} to {temp_dir}")
     
-    # Run the yt-dlp processor script
+    # Run the yt-dlp processor script with full path
+    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yt-dlp-aduio-processor-v1.py")
     command = [
-        "python3", "yt-dlp-aduio-processor-v1.py",
+        "python3", script_path,
         video_url
     ]
     
@@ -88,8 +89,9 @@ def transcribe_video(audio_path, desc_path, message_id, progress_callback=None):
         total_duration = None
     
     # Extract chunks to process, so we can track progress
+    transcribe_script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transcribe-whisper-gpu.py")
     command = [
-        "python3", "transcribe-whisper-gpu.py",
+        "python3", transcribe_script_path,
         "--audio", audio_path,
         "--desc", desc_path,
         "--model", MODEL_NAME,
@@ -147,7 +149,7 @@ def transcribe_video(audio_path, desc_path, message_id, progress_callback=None):
         
         # Run the actual transcription
         command = [
-            "python3", "transcribe-whisper-gpu.py",
+            "python3", transcribe_script_path,
             "--audio", audio_path,
             "--desc", desc_path,
             "--model", MODEL_NAME,
@@ -189,7 +191,10 @@ def publish_progress(message_id, video_url, status, progress_percent,
         return
         
     try:
-        publisher = pubsub_v1.PublisherClient()
+        # Use the publisher credentials
+        publisher_credentials_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
+                                            "rag-widget-pubsub-publisher-key.json")
+        publisher = pubsub_v1.PublisherClient.from_service_account_json(publisher_credentials_path)
         topic_path = publisher.topic_path(PROJECT_ID, PROGRESS_TOPIC_ID)
         
         # Extract video_id from URL
@@ -251,7 +256,10 @@ def get_audio_duration(audio_path):
 
 def upload_results(output_dir, message_id):
     """Upload transcription results to GCS"""
-    storage_client = storage.Client()
+    # Use publisher credentials for storage access
+    storage_credentials_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
+                                     "rag-widget-pubsub-publisher-key.json")
+    storage_client = storage.Client.from_service_account_json(storage_credentials_path)
     bucket = storage_client.bucket(BUCKET_NAME)
     
     results_uploaded = 0
@@ -419,6 +427,20 @@ def check_environment():
         logger.error("Please set these variables and restart the container")
         return False
     
+    # Check for credential files
+    publisher_credentials_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
+                                       "rag-widget-pubsub-publisher-key.json")
+    subscriber_credentials_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
+                                        "rag-widget-pubsub-subscriber-key.json")
+    
+    if not os.path.exists(publisher_credentials_path):
+        logger.error(f"Publisher credentials file not found at: {publisher_credentials_path}")
+        return False
+    
+    if not os.path.exists(subscriber_credentials_path):
+        logger.error(f"Subscriber credentials file not found at: {subscriber_credentials_path}")
+        return False
+    
     logger.info(f"Environment check passed")
     logger.info(f"PROJECT_ID: {PROJECT_ID}")
     logger.info(f"SUBSCRIPTION_ID: {SUBSCRIPTION_ID}")
@@ -432,6 +454,9 @@ def check_environment():
     else:
         logger.warning("Progress reporting disabled (PROGRESS_TOPIC_ID not set)")
     
+    logger.info(f"Publisher credentials: {publisher_credentials_path}")
+    logger.info(f"Subscriber credentials: {subscriber_credentials_path}")
+    
     return True
 
 def main():
@@ -442,7 +467,10 @@ def main():
     
     logger.info("Starting video transcription service")
     
-    subscriber = pubsub_v1.SubscriberClient()
+    # Use the subscriber credentials
+    subscriber_credentials_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
+                                        "rag-widget-pubsub-subscriber-key.json")
+    subscriber = pubsub_v1.SubscriberClient.from_service_account_json(subscriber_credentials_path)
     subscription_path = subscriber.subscription_path(PROJECT_ID, SUBSCRIPTION_ID)
     
     # Configure flow control
@@ -486,6 +514,16 @@ if __name__ == "__main__":
             sys.exit(1)
         
         try:
+            # Configure credentials paths
+            publisher_credentials_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
+                                             "rag-widget-pubsub-publisher-key.json")
+            
+            # Check if credentials files exist
+            if os.path.exists(publisher_credentials_path):
+                logger.info(f"Found publisher credentials at: {publisher_credentials_path}")
+            else:
+                logger.warning(f"Publisher credentials not found at: {publisher_credentials_path}")
+            
             # Simulate a message
             class TestMessage:
                 def __init__(self, url):
