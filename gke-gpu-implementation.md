@@ -255,7 +255,7 @@ if __name__ == "__main__":
    - Configuration: Dockerfile
    - Dockerfile directory: `/` (or your directory)
    - Dockerfile name: `Dockerfile`
-   - Image name: `[REGION]-docker.pkg.dev/[PROJECT_ID]/video-transcriber/transcriber:latest`
+   - Image name: `us-south1-docker.pkg.dev/rag-widget/video-transcriber/transcriber:latest`
    - Click "Create"
    - Click "Run" to build the image
 
