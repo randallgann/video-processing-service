@@ -28,7 +28,7 @@ def main():
     
     download_cmd = [
         "python3", "yt-dlp-aduio-processor-v1.py",
-        "--url", video_url,
+        video_url,
         "--output", temp_dir
     ]
     result = subprocess.run(download_cmd, capture_output=True, text=True)
