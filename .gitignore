@@ -15,3 +15,4 @@ rag-widget-pubsub-subscriber-key.json
 setup-env-vars.ps1
 setup-env-vars.sh
 LOCAL-TESTING.md
+key.json

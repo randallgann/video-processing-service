@@ -1,0 +1,76 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: transcription-config
+type: Opaque
+stringData:
+  PROJECT_ID: "rag-widget"
+  SUBSCRIPTION_ID: "video-transcription-processor"
+  BUCKET_NAME: "rag-widget-transcription-outputs"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: video-transcriber
+  labels:
+    app: video-transcriber
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: video-transcriber
+  template:
+    metadata:
+      labels:
+        app: video-transcriber
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-accelerator: "nvidia-l4"
+      containers:
+      - name: transcriber
+        image: us-south1-docker.pkg.dev/rag-widget/video-transcriber/transcriber:latest
+        env:
+        - name: GPU_COUNT
+          value: "1"
+        - name: MODEL_NAME
+          value: "medium"
+        - name: MAX_MESSAGES
+          value: "1"
+        envFrom:
+        - secretRef:
+            name: transcription-config
+        resources:
+          requests:
+            cpu: "4"
+            memory: "16Gi"
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: "24Gi"
+            nvidia.com/gpu: 1
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: video-transcriber-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: video-transcriber
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+  - type: External
+    external:
+      metric:
+        name: pubsub.googleapis.com|subscription|num_undelivered_messages
+        selector:
+          matchLabels:
+            resource.labels.subscription_id: video-transcription-processor
+      target:
+        type: AverageValue
+        averageValue: 1
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300

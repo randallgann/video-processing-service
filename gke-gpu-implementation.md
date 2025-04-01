@@ -236,9 +236,9 @@ if __name__ == "__main__":
 
 ### 2. Build and Push Docker Image
 
-#### Steps in GCP Console:
+#### Steps to Build and Push Locally:
 
-1. **Navigate to Artifact Registry**
+1. **Navigate to Artifact Registry in GCP Console**
    - Go to GCP Console → Artifact Registry → Repositories
    - Click "Create Repository"
    - Name: `video-transcriber`
@@ -246,18 +246,34 @@ if __name__ == "__main__":
    - Location type: Region (select your preferred region)
    - Click "Create"
 
-2. **Build and Push Using Cloud Build**
-   - Go to Cloud Build → Triggers
-   - Click "Create Trigger"
-   - Name: `build-transcriber-image`
-   - Event: Manual invocation
-   - Source: Connect to your repository (GitHub/BitBucket/etc.)
-   - Configuration: Dockerfile
-   - Dockerfile directory: `/` (or your directory)
-   - Dockerfile name: `Dockerfile`
-   - Image name: `us-south1-docker.pkg.dev/rag-widget/video-transcriber/transcriber:latest`
-   - Click "Create"
-   - Click "Run" to build the image
+2. **Configure Docker for GCP Authentication**
+   ```bash
+   # Install Google Cloud CLI if not already installed
+   # https://cloud.google.com/sdk/docs/install
+   
+   # Login to Google Cloud
+   gcloud auth login
+   
+   # Configure Docker to use gcloud for authentication with Artifact Registry
+   gcloud auth configure-docker us-south1-docker.pkg.dev
+   ```
+
+3. **Build the Docker Image Locally**
+   ```bash
+   # Navigate to your project directory containing the Dockerfile
+   cd /path/to/your/project
+   
+   # Build the Docker image
+   docker build -t us-central1-docker.pkg.dev/rag-widget/video-transcriber/transcriber:latest .
+   ```
+
+4. **Push the Docker Image to Artifact Registry**
+   ```bash
+   # Push the image to Artifact Registry
+   docker push us-central1-docker.pkg.dev/rag-widget/video-transcriber/transcriber:latest
+   ```
+
+Note: If you run into permission issues, make sure your user account has the "Artifact Registry Writer" role for the repository.
 
 ### 3. Create GKE Autopilot Cluster
 
@@ -286,11 +302,20 @@ if __name__ == "__main__":
 
 ### 4. Configure GPU Resources
 
+1. **Ensure GPU quota**
+   - https://cloud.google.com/kubernetes-engine/docs/how-to/gpus
+   - ![Most US Regions Have Quota of 1](image.png)
+   - Review 'Running GPUs in GKE Standard Clusters'
+   - https://cloud.google.com/kubernetes-engine/docs/how-to/autopilot-gpus
 1. **Enable GPUs for Autopilot**
    - Go to your cluster → Features
    - Find "GPU resources" in the list
    - Click "Enable" (if not already enabled)
    - Select "NVIDIA L4" (best price/performance)
+   - This command only work for GKE Standard
+   ```
+   gcloud container node-pools create nvl4 --accelerator type=nvidia-l4,count=1,gpu-driver-version=default --machine-type g2-standard-4 --region us-central1 --cluster autopilot-cluster-1 --node-locations us-south1-c
+   ```
 
 ### 5. Create Pub/Sub Topic and Subscription
 

@@ -1,0 +1,31 @@
+  apiVersion: v1
+  kind: Pod
+  metadata:
+    name: video-transcriber-test
+    labels:
+      app: video-transcriber
+  spec:
+    nodeSelector:
+      cloud.google.com/gke-accelerator: "nvidia-l4"
+    containers:
+    - name: transcriber
+      image: us-south1-docker.pkg.dev/rag-widget/video-transcriber/transcriber:latest
+      env:
+      - name: GPU_COUNT
+        value: "1"
+      - name: MODEL_NAME
+        value: "medium"
+      - name: MAX_MESSAGES
+        value: "1"
+      envFrom:
+      - secretRef:
+          name: transcription-config
+      resources:
+        limits:
+          cpu: "8"
+          memory: "24Gi"
+          nvidia.com/gpu: 1
+        requests:
+          cpu: "4"
+          memory: "16Gi"
+          nvidia.com/gpu: 1

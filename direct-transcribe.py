@@ -31,9 +31,11 @@ def main():
         video_url,
         "--output", temp_dir
     ]
-    result = subprocess.run(download_cmd, capture_output=True, text=True)
+    # Run the command and show output in real-time
+    print("Running download command:", " ".join(download_cmd))
+    result = subprocess.run(download_cmd, text=True)
     if result.returncode != 0:
-        print(f"Error downloading video: {result.stderr}")
+        print(f"Error downloading video. Return code: {result.returncode}")
         return
     
     # Find the downloaded audio file

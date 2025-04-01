@@ -5,10 +5,15 @@ def download_audio(url, download_path="./"):
     """
     Downloads YouTube audio using yt-dlp
     """
+    
+    # Ensure download_path is an absolute path
+    download_path = os.path.abspath(download_path)
+    print(f"Using download path: {download_path}")
 
     # Configure yt-dlp options
     ydl_opts = {
         'format': 'bestaudio/best',  # Download best quality
+        'paths': {'home': download_path},  # Set the base download path
         'outtmpl': {'default': os.path.join(download_path, '%(title)s.%(ext)s')},
         'quiet': False,  # Show progress
         'no_warnings': False,
@@ -27,9 +32,26 @@ def download_audio(url, download_path="./"):
             print("Extracting video information...")
             info = ydl.extract_info(url, download=True)
             title = info['title']
+            # Get the base filename and ensure it's in the correct output directory
             base_filename = ydl.prepare_filename(info)
+            # Make sure we're using the full path
+            if not os.path.isabs(base_filename):
+                base_filename = os.path.join(download_path, os.path.basename(base_filename))
             base_filename_no_ext, _ = os.path.splitext(base_filename)
             audio_path = base_filename_no_ext + ".mp3"
+            print(f"Expected audio path: {audio_path}")
+            
+            # Verify file exists
+            if os.path.exists(audio_path):
+                print(f"Audio file exists at: {audio_path}")
+            else:
+                print(f"Audio file not found at: {audio_path}")
+                # Try to find the file in the download directory
+                for file in os.listdir(download_path):
+                    if file.endswith('.mp3'):
+                        audio_path = os.path.join(download_path, file)
+                        print(f"Found audio file at: {audio_path}")
+                        break
             description = info.get('description', '')
             upload_date = info.get('upload_date')
             print(f"Download completed: {audio_path}")
@@ -60,6 +82,11 @@ def download_and_process_audio(url, download_path="./"):
     Downloads a YouTube video and transcribes it with speaker identification
     """
     try:
+        # Ensure download_path exists
+        download_path = os.path.abspath(download_path)
+        os.makedirs(download_path, exist_ok=True)
+        print(f"Downloading audio to: {download_path}")
+        
         # Download video using yt-dlp
         # video_path, video_title, cleaned_title = download_video(url, download_path)
         # print(f"Video saved as: {video_path}")
@@ -120,10 +147,11 @@ def download_and_process_audio(url, download_path="./"):
 
 if __name__ == "__main__":
     import sys
+    import argparse
     
-    if len(sys.argv) > 1:
-        video_url = sys.argv[1]
-    else:
-        video_url = "https://www.youtube.com/watch?v=00VsIoi0jwo"  # Default URL
-        
-    download_and_process_audio(video_url)
+    parser = argparse.ArgumentParser(description="Download audio from YouTube videos")
+    parser.add_argument("url", help="YouTube video URL")
+    parser.add_argument("--output", default="./", help="Output directory (default: current directory)")
+    args = parser.parse_args()
+    
+    download_and_process_audio(args.url, args.output)
