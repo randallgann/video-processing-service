@@ -293,11 +293,18 @@ def process_message(message):
         
         # Parse message data
         data = json.loads(message.data.decode('utf-8'))
+        
+        # Handle both direct video_url and nested structure
         video_url = data.get('video_url')
         
+        # If video_url is not directly in the data, check if it's in a nested 'video' object
+        if not video_url and 'video' in data and isinstance(data['video'], dict):
+            video_url = data['video'].get('url')
+            
         if not video_url:
-            logger.error("Message missing video_url")
-            message.ack()
+            logger.error("Message missing video_url or video.url")
+            logger.error(f"Message data: {data}")
+            message.ack()  # Acknowledge to avoid reprocessing the same invalid message
             return
         
         # Initial progress update - Starting

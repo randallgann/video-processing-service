@@ -297,10 +297,10 @@ After=network.target
 
 [Service]
 Type=simple
-User=$USER
-WorkingDirectory=$(pwd)
-ExecStart=$(pwd)/venv/bin/python3 k8s-processor.py
-Environment="GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/key.json"
+User=root
+WorkingDirectory=/root/transcription-service/video-processing-service
+ExecStart=/root/transcription-service/video-processing-service/venv/bin/python3 k8s-processor.py
+Environment="GOOGLE_APPLICATION_CREDENTIALS=/root/transcription-service/video-processing-service/key.json"
 Environment="PROJECT_ID=rag-widget"
 Environment="SUBSCRIPTION_ID=video-transcription-processor"
 Environment="BUCKET_NAME=rag-widget-transcription-outputs"
@@ -311,9 +311,10 @@ Restart=always
 
 [Install]
 WantedBy=multi-user.target
-EOL
+```
 
 # Enable and start the service
+sudo systemctl daemon-reload
 sudo systemctl enable transcription.service
 sudo systemctl start transcription.service
 
