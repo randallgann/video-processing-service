@@ -168,15 +168,29 @@ def transcribe_video(audio_path, desc_path, message_id, progress_callback=None):
             logger.error(f"Error transcribing video: {result.stderr}")
             raise Exception(f"Failed to transcribe video: {result.stderr}")
         
-        # Find the output transcript JSON file
+        # Find the output transcript JSON file - it could be in the current directory or in the audio directory
         transcript_file = os.path.splitext(os.path.basename(audio_path))[0] + "_transcript.json"
-        transcript_path = os.path.join(os.path.dirname(audio_path), transcript_file)
+        possible_paths = [
+            os.path.join(os.path.dirname(audio_path), transcript_file),  # In the audio directory
+            os.path.join(os.getcwd(), transcript_file),                  # In the current working directory
+            transcript_file                                              # Direct in current dir
+        ]
         
-        if os.path.exists(transcript_path):
-            # Copy the transcript to output dir
-            os.system(f"cp {transcript_path} {output_dir}/")
-        else:
-            logger.error(f"Transcript file not found: {transcript_path}")
+        transcript_found = False
+        for transcript_path in possible_paths:
+            if os.path.exists(transcript_path):
+                # Copy the transcript to output dir
+                logger.info(f"Found transcript at: {transcript_path}")
+                os.system(f"cp {transcript_path} {output_dir}/")
+                transcript_found = True
+                break
+        
+        if not transcript_found:
+            # List files in audio directory to debug
+            audio_dir = os.path.dirname(audio_path)
+            logger.error(f"Transcript file not found in any of the expected locations: {possible_paths}")
+            logger.error(f"Files in audio directory: {os.listdir(audio_dir)}")
+            logger.error(f"Files in current directory: {os.listdir(os.getcwd())}")
             raise Exception("Transcript file not found after processing")
         
         # Wait for monitor thread to complete
@@ -291,6 +305,8 @@ def process_message(message):
     """Process a single Pub/Sub message with progress reporting"""
     temp_dirs = []
     start_time = time.time()
+    message_id = None
+    video_url = None
     
     try:
         message_id = message.message_id
@@ -388,6 +404,27 @@ def process_message(message):
             start_time=start_time
         )
         
+        # Check if we have a transcript file before trying to upload
+        transcript_file = os.path.splitext(os.path.basename(audio_path))[0] + "_transcript.json"
+        transcript_path = os.path.join(output_dir, transcript_file)
+        
+        if not os.path.exists(transcript_path):
+            logger.warning(f"No transcript file found in output directory: {output_dir}")
+            # Search for it in other possible locations
+            possible_locations = [
+                os.path.join(os.getcwd(), transcript_file),
+                os.path.join(os.path.dirname(audio_path), transcript_file)
+            ]
+            for possible_path in possible_locations:
+                if os.path.exists(possible_path):
+                    logger.info(f"Found transcript at {possible_path}, copying to output directory")
+                    os.system(f"cp {possible_path} {output_dir}/")
+                    break
+        
+        # Make sure we have files to upload
+        if len(os.listdir(output_dir)) == 0:
+            raise Exception("Output directory is empty, no files to upload")
+            
         upload_results(output_dir, message_id)
         
         # Final progress update - Completed
@@ -408,7 +445,7 @@ def process_message(message):
     except Exception as e:
         logger.error(f"Error processing message: {e}")
         # Report error progress
-        if 'video_url' in locals() and 'message_id' in locals():
+        if video_url and message_id:
             publish_progress(
                 message_id=message_id,
                 video_url=video_url,
@@ -416,16 +453,28 @@ def process_message(message):
                 progress_percent=0,
                 current_stage="error",
                 stage_progress_percent=0,
-                start_time=start_time if 'start_time' in locals() else time.time(),
+                start_time=start_time,
                 error=str(e)
             )
-        # Don't acknowledge to allow redelivery
+            
+            # Don't retry if we made significant progress (got past download and into transcription)
+            # Just check where we were in the process
+            if 'output_dir' in locals():  # We got as far as creating the output directory for transcription
+                logger.warning("Error occurred after significant processing, acknowledging message to avoid retry")
+                message.ack()
+            else:
+                logger.info("Not acknowledging message to allow redelivery")
+        else:
+            # If we can't even extract the message ID and URL, just ack the message
+            logger.warning("Couldn't extract message_id or video_url, acknowledging to prevent infinite retry")
+            message.ack()
     finally:
         # Cleanup
         for dir_path in temp_dirs:
             try:
-                logger.info(f"Cleaning up directory: {dir_path}")
-                subprocess.run(["rm", "-rf", dir_path], check=False)
+                if dir_path and os.path.exists(dir_path):
+                    logger.info(f"Cleaning up directory: {dir_path}")
+                    subprocess.run(["rm", "-rf", dir_path], check=False)
             except Exception as e:
                 logger.warning(f"Error cleaning up directory {dir_path}: {e}")
 
