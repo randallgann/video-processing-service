@@ -36,8 +36,10 @@ def download_video(video_url):
     
     # Run the yt-dlp processor script with full path
     script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yt-dlp-aduio-processor-v1.py")
+    # Use the same Python interpreter that's running this script
+    python_executable = sys.executable
     command = [
-        "python3", script_path,
+        python_executable, script_path,
         video_url
     ]
     
@@ -90,8 +92,10 @@ def transcribe_video(audio_path, desc_path, message_id, progress_callback=None):
     
     # Extract chunks to process, so we can track progress
     transcribe_script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transcribe-whisper-gpu.py")
+    # Use the same Python interpreter that's running this script
+    python_executable = sys.executable
     command = [
-        "python3", transcribe_script_path,
+        python_executable, transcribe_script_path,
         "--audio", audio_path,
         "--desc", desc_path,
         "--model", MODEL_NAME,
@@ -148,8 +152,9 @@ def transcribe_video(audio_path, desc_path, message_id, progress_callback=None):
         monitor_thread.start()
         
         # Run the actual transcription
+        # Use the same Python interpreter that's running this script
         command = [
-            "python3", transcribe_script_path,
+            python_executable, transcribe_script_path,
             "--audio", audio_path,
             "--desc", desc_path,
             "--model", MODEL_NAME,
