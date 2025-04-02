@@ -314,12 +314,16 @@ WantedBy=multi-user.target
 ```
 
 # Enable and start the service
+```
 sudo systemctl daemon-reload
 sudo systemctl enable transcription.service
 sudo systemctl start transcription.service
+```
 
-# Check status
+# Check status & Monitor Logs
+```
 sudo systemctl status transcription.service
+journalctl -u transcription.service -f
 ```
 
 ## 8. Monitoring and Maintenance

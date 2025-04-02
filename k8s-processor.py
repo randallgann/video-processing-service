@@ -115,6 +115,10 @@ def transcribe_video(audio_path, desc_path, message_id, progress_callback=None):
         total_chunks = len(chunks)
         logger.info(f"Processing {total_chunks} chunks")
         
+        # Create a shared event to signal when the main process is done
+        import threading
+        stop_monitor = threading.Event()
+        
         # Function to monitor progress file
         def monitor_progress():
             try:
@@ -125,7 +129,7 @@ def transcribe_video(audio_path, desc_path, message_id, progress_callback=None):
                     f.write("0")
                 
                 processed_chunks = 0
-                while processed_chunks < total_chunks:
+                while not stop_monitor.is_set() and processed_chunks < total_chunks:
                     try:
                         with open(progress_file, 'r') as f:
                             processed_chunks = int(f.read().strip())
@@ -141,12 +145,15 @@ def transcribe_video(audio_path, desc_path, message_id, progress_callback=None):
                     if processed_chunks >= total_chunks:
                         break
                         
-                    time.sleep(5)  # Check every 5 seconds
+                    # Check for stop signal every 1 second
+                    stop_monitor.wait(1)
+                
+                if stop_monitor.is_set():
+                    logger.info("Progress monitoring stopped by main thread")
             except Exception as e:
                 logger.error(f"Error monitoring progress: {e}")
         
         # Start progress monitoring in a thread
-        import threading
         monitor_thread = threading.Thread(target=monitor_progress)
         monitor_thread.daemon = True
         monitor_thread.start()
@@ -166,6 +173,8 @@ def transcribe_video(audio_path, desc_path, message_id, progress_callback=None):
         
         if result.returncode != 0:
             logger.error(f"Error transcribing video: {result.stderr}")
+            # Signal the monitoring thread to stop
+            stop_monitor.set()
             raise Exception(f"Failed to transcribe video: {result.stderr}")
         
         # Find the output transcript JSON file - it could be in the current directory or in the audio directory
@@ -191,13 +200,22 @@ def transcribe_video(audio_path, desc_path, message_id, progress_callback=None):
             logger.error(f"Transcript file not found in any of the expected locations: {possible_paths}")
             logger.error(f"Files in audio directory: {os.listdir(audio_dir)}")
             logger.error(f"Files in current directory: {os.listdir(os.getcwd())}")
+            # Signal the monitoring thread to stop
+            stop_monitor.set()
             raise Exception("Transcript file not found after processing")
         
-        # Wait for monitor thread to complete
-        monitor_thread.join(timeout=1)
+        # Signal the monitoring thread to stop and wait for it to terminate
+        logger.info("Signaling progress monitor to stop")
+        stop_monitor.set()
+        monitor_thread.join(timeout=5)  # Give it a longer timeout
+        if monitor_thread.is_alive():
+            logger.warning("Monitor thread did not terminate cleanly, continuing anyway")
         
         return output_dir
     except Exception as e:
+        # Make sure to signal the monitoring thread to stop in case of exception
+        if 'stop_monitor' in locals():
+            stop_monitor.set()
         logger.error(f"Error in transcribe_video: {e}")
         raise
 
@@ -477,6 +495,16 @@ def process_message(message):
                     subprocess.run(["rm", "-rf", dir_path], check=False)
             except Exception as e:
                 logger.warning(f"Error cleaning up directory {dir_path}: {e}")
+                
+        # Clean up any leftover transcript files in the current directory
+        try:
+            if 'audio_path' in locals() and audio_path:
+                transcript_file = os.path.splitext(os.path.basename(audio_path))[0] + "_transcript.json"
+                if os.path.exists(transcript_file):
+                    logger.info(f"Cleaning up leftover transcript file: {transcript_file}")
+                    os.remove(transcript_file)
+        except Exception as e:
+            logger.warning(f"Error cleaning up leftover transcript file: {e}")
 
 def check_environment():
     """Check if all required environment variables are set"""
