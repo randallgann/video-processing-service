@@ -243,6 +243,8 @@ def process_chunk_replicate(chunk_info, model_version=None, language="en"):
     # Check if REPLICATE_API_TOKEN is set
     if not os.environ.get("REPLICATE_API_TOKEN"):
         raise ValueError("REPLICATE_API_TOKEN environment variable not set")
+        
+    print(f"Using Replicate API with model version: {model_version}")
     
     # Default model version if not provided
     if not model_version:
@@ -260,7 +262,9 @@ def process_chunk_replicate(chunk_info, model_version=None, language="en"):
     # Try to call Replicate API with retries
     for attempt in range(max_retries):
         try:
-            # Call Replicate API
+            # Call Replicate API with more detailed debug information
+            print(f"Calling Replicate API with URL: {audio_url}")
+            
             output = replicate.run(
                 f"openai/whisper:{model_version}",
                 input={
@@ -274,9 +278,37 @@ def process_chunk_replicate(chunk_info, model_version=None, language="en"):
                 }
             )
             
-            # Parse the SRT content to get segments with timestamps
-            # SRT format: sequence number, timestamp range, text, blank line
-            srt_content = output.get("transcription", "")
+            # Debug the output
+            print(f"Replicate API response type: {type(output)}")
+            if output is None:
+                print("WARNING: Received None response from Replicate API")
+                raise ValueError("Empty response from Replicate API")
+                
+            if isinstance(output, dict):
+                print(f"Response keys: {list(output.keys())}")
+            elif isinstance(output, str):
+                print(f"Received string response (first 100 chars): {output[:100]}...")
+                # If it's a string, it might be the transcription directly
+                srt_content = output
+            else:
+                print(f"Unexpected response type: {type(output)}")
+                
+            # Handle different response formats
+            if isinstance(output, dict):
+                srt_content = output.get("transcription", "")
+                if not srt_content and "srt_file" in output:
+                    # Some versions might return a URL to the SRT file
+                    srt_url = output.get("srt_file")
+                    if srt_url:
+                        print(f"Downloading SRT from URL: {srt_url}")
+                        try:
+                            srt_response = requests.get(srt_url)
+                            srt_content = srt_response.text
+                        except Exception as e:
+                            print(f"Error downloading SRT file: {e}")
+            elif isinstance(output, str):
+                # If it's a string, it might be the transcription directly
+                srt_content = output
             
             # Simple SRT parser
             segments = []
