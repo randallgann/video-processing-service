@@ -70,19 +70,28 @@ class AudioServer:
     def get_external_ip(self):
         """
         Get the machine's external IP address.
-        In cloud environments, this should be changed to return the public IP.
+        In cloud environments, this will try to use the public IP from environment variable.
         """
-        # For local development, use localhost
+        # First check if PUBLIC_IP environment variable is set
+        public_ip = os.environ.get('PUBLIC_IP')
+        if public_ip:
+            return public_ip
+            
+        # Otherwise try to get the local network IP
         if self.host == '0.0.0.0':
-            # Try to get the actual machine IP for better external access
             try:
+                # Try to get the actual machine IP for better external access
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 # Doesn't need to be reachable, just to determine the interface
                 s.connect(('8.8.8.8', 80))
                 ip = s.getsockname()[0]
                 s.close()
+                print(f"WARNING: Using local IP address {ip}. This will not work if Replicate cannot reach your network.")
+                print("Set the PUBLIC_IP environment variable to your server's public IP address.")
                 return ip
             except:
+                print("WARNING: Using localhost. This will not work with Replicate!")
+                print("Set the PUBLIC_IP environment variable to your server's public IP address.")
                 return 'localhost'
         return self.host
     
