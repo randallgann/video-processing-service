@@ -13,6 +13,7 @@ def main():
                       help="Replicate model version to use")
     parser.add_argument("--output", default="./outputs", help="Output directory (default: ./outputs)")
     parser.add_argument("--max-concurrent", default="5", help="Maximum concurrent API calls (default: 5)")
+    parser.add_argument("--use-wav", action="store_true", help="Use WAV format for audio chunks (better API compatibility)")
     args = parser.parse_args()
     
     # Ensure REPLICATE_API_TOKEN is set
@@ -69,6 +70,12 @@ def main():
         "--model-version", model_version,
         "--max-concurrent", args.max_concurrent
     ]
+    
+    # Add WAV option if specified
+    if args.use_wav:
+        transcribe_cmd.append("--use-wav")
+        print("Using WAV format for audio chunks (better compatibility with Replicate API)")
+    
     subprocess.run(transcribe_cmd)
     
     # Move results to output directory

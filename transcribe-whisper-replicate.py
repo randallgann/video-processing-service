@@ -27,10 +27,16 @@ def get_audio_length(audio_file_path):
     duration_str = result.stdout.strip()
     return float(duration_str)
 
-def split_audio(audio_file_path, chunk_length=300, max_duration=None):
+def split_audio(audio_file_path, chunk_length=300, max_duration=None, use_wav=False):
     """
     Splits the audio into smaller chunks of `chunk_length` seconds each.
     Returns a list of chunk file paths and the total length of the audio.
+    
+    Args:
+        audio_file_path: Path to audio file
+        chunk_length: Length of each chunk in seconds
+        max_duration: Maximum duration to process
+        use_wav: Whether to output WAV format (better compatibility with APIs)
     """
     base_name = os.path.splitext(os.path.basename(audio_file_path))[0]
     output_dir = f"{base_name}_chunks"
@@ -45,6 +51,10 @@ def split_audio(audio_file_path, chunk_length=300, max_duration=None):
 
     num_chunks = math.ceil(total_length / chunk_length)
 
+    # Determine output format
+    output_ext = "wav" if use_wav else "mp3"
+    print(f"Using {output_ext.upper()} format for audio chunks")
+
     chunk_paths = []
     for i in range(num_chunks):
         start = i * chunk_length
@@ -55,18 +65,36 @@ def split_audio(audio_file_path, chunk_length=300, max_duration=None):
         if duration <= 0:
             break
 
-        chunk_output = os.path.join(output_dir, f"chunk_{i:03d}.mp3")
+        chunk_output = os.path.join(output_dir, f"chunk_{i:03d}.{output_ext}")
+        
         # ffmpeg command to slice audio
-        cmd = [
-            "ffmpeg",
-            "-y",  # overwrite
-            "-i", audio_file_path,
-            "-ss", str(start),
-            "-t", str(chunk_length),
-            "-c", "copy",
-            chunk_output
-        ]
+        if use_wav:
+            # For WAV, we need to decode and re-encode (can't use copy codec)
+            cmd = [
+                "ffmpeg",
+                "-y",  # overwrite
+                "-i", audio_file_path,
+                "-ss", str(start),
+                "-t", str(chunk_length),
+                "-acodec", "pcm_s16le",  # Standard 16-bit PCM WAV format
+                "-ar", "16000",          # 16kHz sample rate (good for speech)
+                "-ac", "1",              # Mono channel
+                chunk_output
+            ]
+        else:
+            # For MP3, we can try to copy codec for speed
+            cmd = [
+                "ffmpeg",
+                "-y",  # overwrite
+                "-i", audio_file_path,
+                "-ss", str(start),
+                "-t", str(chunk_length),
+                "-c", "copy",
+                chunk_output
+            ]
+        
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
         if os.path.exists(chunk_output):
             chunk_paths.append(chunk_output)
         else:
@@ -489,7 +517,7 @@ def chunk_segments_for_vector(all_segments, chunk_duration=60.0):
 
     return chunks
 
-def main(audio_path, desc_path, max_duration=None, model_version=None, max_concurrent=5):
+def main(audio_path, desc_path, max_duration=None, model_version=None, max_concurrent=5, use_wav=False):
     start_time = time.time()
     
     # 1. Load episode description and topics
@@ -508,7 +536,11 @@ def main(audio_path, desc_path, max_duration=None, model_version=None, max_concu
 
     # 2. Split audio into chunks and get total_length
     print("Splitting audio into chunks...")
-    chunk_paths, total_length = split_audio(audio_path, chunk_length=300, max_duration=max_duration)
+    # Check for environment variable override
+    env_use_wav = os.environ.get('USE_WAV_FORMAT', '').lower() in ('true', '1', 'yes')
+    use_wav = use_wav or env_use_wav
+    
+    chunk_paths, total_length = split_audio(audio_path, chunk_length=300, max_duration=max_duration, use_wav=use_wav)
     
     # If list-chunks-only is specified, just print the chunks and exit
     if args.list_chunks_only:
@@ -585,6 +617,7 @@ if __name__ == "__main__":
                         help="Maximum duration to transcribe in seconds (default: full audio)")
     parser.add_argument("--progress-file", type=str, help="File to write progress updates to")
     parser.add_argument("--list-chunks-only", action="store_true", help="Only list chunks without processing")
+    parser.add_argument("--use-wav", action="store_true", help="Use WAV format for audio chunks (better API compatibility)")
     
     args = parser.parse_args()
     
@@ -604,4 +637,5 @@ if __name__ == "__main__":
         desc_path = args.desc
     
     main(audio_path, desc_path, max_duration=args.max_duration, 
-         model_version=args.model_version, max_concurrent=args.max_concurrent)
+         model_version=args.model_version, max_concurrent=args.max_concurrent,
+         use_wav=args.use_wav)
