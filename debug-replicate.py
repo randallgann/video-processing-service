@@ -23,9 +23,15 @@ def test_replicate_api(audio_url, model_type=None, model_version=None):
         sys.exit(1)
     
     # Get model information based on model_type or model_version
+    is_fast_model = False
+    
     if model_version:
         # If specific version is provided, use it directly
         model_id = "openai/whisper"  # Default to OpenAI model ID
+        # Check if this is the fast model version
+        fast_whisper = os.environ.get("FAST_WHISPER", "")
+        if ":" in fast_whisper and model_version == fast_whisper.split(":", 1)[1]:
+            is_fast_model = True
     elif model_type == "fast":
         # Use fast whisper model from env var
         fast_whisper = os.environ.get("FAST_WHISPER")
@@ -33,6 +39,7 @@ def test_replicate_api(audio_url, model_type=None, model_version=None):
             print("Error: FAST_WHISPER environment variable not properly set")
             sys.exit(1)
         model_id, model_version = fast_whisper.split(":", 1)
+        is_fast_model = True
     else:
         # Default to OpenAI whisper model from env var
         openai_whisper = os.environ.get("OPENAI_WHISPER")
@@ -41,10 +48,15 @@ def test_replicate_api(audio_url, model_type=None, model_version=None):
             sys.exit(1)
         model_id, model_version = openai_whisper.split(":", 1)
     
+    # Set language based on model type
+    language = "english" if is_fast_model else "auto"
+    
     print(f"Testing Replicate API with:")
     print(f"- Audio URL: {audio_url}")
     print(f"- Model ID: {model_id}")
     print(f"- Model version: {model_version}")
+    print(f"- Model type: {'Fast Whisper' if is_fast_model else 'OpenAI Whisper'}")
+    print(f"- Language: {language}")
     print(f"- API token: {'*' * 8}{os.environ.get('REPLICATE_API_TOKEN')[-4:]}")
     
     try:
@@ -54,7 +66,7 @@ def test_replicate_api(audio_url, model_type=None, model_version=None):
             f"{model_id}:{model_version}",
             input={
                 "audio": audio_url,
-                "language": "auto",
+                "language": language,
                 "translate": False,
                 "temperature": 0,
                 "transcription": "plain text"  # Using plain text for simpler testing
