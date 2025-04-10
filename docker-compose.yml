@@ -1,0 +1,42 @@
+version: '3'
+
+services:
+  transcriber:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: youtube-video-transcriber
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+      - ./credentials:/app/credentials
+    environment:
+      - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN}
+      - PROJECT_ID=${PROJECT_ID}
+      - SUBSCRIPTION_ID=${SUBSCRIPTION_ID}
+      - BUCKET_NAME=${BUCKET_NAME}
+      - PROGRESS_TOPIC_ID=${PROGRESS_TOPIC_ID}
+      - OPENAI_WHISPER=${OPENAI_WHISPER}
+      - FAST_WHISPER=${FAST_WHISPER}
+      - DEFAULT_MODEL_TYPE=${DEFAULT_MODEL_TYPE:-openai}
+      - USE_WAV_FORMAT=${USE_WAV_FORMAT:-true}
+      - CHUNK_LENGTH_SECONDS=${CHUNK_LENGTH_SECONDS:-300}
+      - MAX_CONCURRENT_UPLOADS=${MAX_CONCURRENT_UPLOADS:-5}
+      - MAX_CONCURRENT_TRANSCRIPTIONS=${MAX_CONCURRENT_TRANSCRIPTIONS:-5}
+      - MAX_MESSAGES=${MAX_MESSAGES:-1}
+    # For testing with a specific video:
+    # command: --test --video-url https://www.youtube.com/watch?v=YOUR_VIDEO_ID
+
+  # Optional monitoring service for development
+  progress-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: progress-monitor
+    restart: unless-stopped
+    command: python3 monitor-progress.py
+    environment:
+      - PROJECT_ID=${PROJECT_ID}
+      - SUBSCRIPTION_ID=video-processing-progress-sub
+    profiles:
+      - dev
