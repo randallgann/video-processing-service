@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 PROJECT_ID = os.environ.get('PROJECT_ID')
 SUBSCRIPTION_ID = os.environ.get('SUBSCRIPTION_ID')
 BUCKET_NAME = os.environ.get('BUCKET_NAME')
+AUDIO_CHUNKS_BUCKET = os.environ.get('AUDIO_CHUNKS_BUCKET', 'rag-widget-audio-chunks')
 PROGRESS_TOPIC_ID = os.environ.get('PROGRESS_TOPIC_ID', '')
 MAX_MESSAGES = int(os.environ.get('MAX_MESSAGES', '1'))
 CHUNK_LENGTH_SECONDS = int(os.environ.get('CHUNK_LENGTH_SECONDS', '300'))  # 5 minutes by default
@@ -844,7 +845,7 @@ def process_message(message):
             start_time=start_time
         )
         
-        chunks = upload_chunks(chunks, BUCKET_NAME, message_id)
+        chunks = upload_chunks(chunks, AUDIO_CHUNKS_BUCKET, message_id)
         
         # Check if all chunks were uploaded successfully
         failed_uploads = sum(1 for chunk in chunks if chunk.get("upload_failed", False))
@@ -1065,6 +1066,7 @@ def check_environment():
     logger.info(f"PROJECT_ID: {PROJECT_ID}")
     logger.info(f"SUBSCRIPTION_ID: {SUBSCRIPTION_ID}")
     logger.info(f"BUCKET_NAME: {BUCKET_NAME}")
+    logger.info(f"AUDIO_CHUNKS_BUCKET: {AUDIO_CHUNKS_BUCKET}")
     logger.info(f"CHUNK_LENGTH_SECONDS: {CHUNK_LENGTH_SECONDS}")
     logger.info(f"MAX_CONCURRENT_UPLOADS: {MAX_CONCURRENT_UPLOADS}")
     logger.info(f"MAX_CONCURRENT_TRANSCRIPTIONS: {MAX_CONCURRENT_TRANSCRIPTIONS}")

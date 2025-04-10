@@ -4,16 +4,16 @@ After=network.target
 
 [Service]
 Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/youtube-video-transcriptor
-ExecStart=/home/ubuntu/youtube-video-transcriptor/venv/bin/python cloud-vm-processor.py
+User=rgann
+WorkingDirectory=/home/rgann/video-processing-service
+ExecStart=/home/rgann/video-processing-service/venv/bin/python cloud-vm-processor.py
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=video-transcription
 Environment=PYTHONUNBUFFERED=1
-EnvironmentFile=/home/ubuntu/youtube-video-transcriptor/.env
+EnvironmentFile=/home/rgann/video-processing-service/.env
 
 [Install]
 WantedBy=multi-user.target

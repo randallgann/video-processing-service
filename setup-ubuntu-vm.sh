@@ -37,6 +37,17 @@ if [ ! -f .env ]; then
     echo "Please edit .env file with your configuration"
 fi
 
+# Setup Google Cloud credentials
+echo "Setting up Google Cloud authentication..."
+echo "NOTE: You need to copy your Google Cloud service account key file to this directory"
+echo "      and set the GOOGLE_APPLICATION_CREDENTIALS variable in your .env file"
+
+# Create a directory for credentials if it doesn't exist
+mkdir -p credentials
+
+echo "To copy your service account key file from your local machine to this server, run:"
+echo "scp /path/to/your-key.json username@server-ip:$(pwd)/credentials/"
+
 # Set up service
 echo "Setting up systemd service..."
 sudo cp video-transcription.service /etc/systemd/system/
