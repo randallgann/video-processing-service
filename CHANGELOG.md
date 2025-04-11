@@ -2,6 +2,14 @@
 
 All notable changes to the YouTube Video Transcription Service will be documented in this file.
 
+## [1.0.2] - 2025-04-11
+
+### Fixed
+- Added direct support for the "incredibly-fast-whisper" model output format
+- Fixed issue with Fast Whisper model response parsing where text was not being extracted
+- Now properly handles top-level 'chunks' and 'text' fields in the API response
+- Added fallback to full transcript text when chunk processing fails
+
 ## [1.0.1] - 2025-04-11
 
 ### Fixed

@@ -393,7 +393,48 @@ def transcribe_chunk_replicate(chunk_info, model_type=None, model_version=None):
                         logger.info(f"Response logs: {output['logs'][:200]}...")
                 
                 try:
-                    if isinstance(output, dict) and 'output' in output:
+                    # DIRECT FORMAT FROM LOGS: Fast Whisper output keys: ['chunks', 'text']
+                    # This is a special case for vaibhavs10/incredibly-fast-whisper model
+                    if isinstance(output, dict) and 'chunks' in output and 'text' in output:
+                        logger.info("Detected direct format from incredibly-fast-whisper model")
+                        # Use the full text as fallback
+                        full_text = output['text'].strip()
+                        logger.info(f"Full text from output (sample): {full_text[:100]}...")
+                        
+                        chunks_data = output['chunks']
+                        logger.info(f"Found {len(chunks_data)} chunks in direct Fast Whisper response")
+                        
+                        # Log sample chunks
+                        for i, chunk in enumerate(chunks_data[:3]):
+                            logger.info(f"Direct chunk {i} data: {chunk}")
+                        
+                        processed_chunks = 0
+                        for chunk in chunks_data:
+                            # Most probably the format is {'text': '...', 'timestamp': [start, end]}
+                            if 'text' in chunk and 'timestamp' in chunk and len(chunk['timestamp']) == 2:
+                                start_time = float(chunk['timestamp'][0]) + chunk_info["start_time"]
+                                end_time = float(chunk['timestamp'][1]) + chunk_info["start_time"]
+                                text = chunk['text'].strip()
+                                
+                                segments.append({
+                                    "start": start_time,
+                                    "end": end_time,
+                                    "text": text
+                                })
+                                processed_chunks += 1
+                        
+                        logger.info(f"Successfully processed {processed_chunks} chunks from direct Fast Whisper")
+                        
+                        # If no chunks were processed but we have the full text, use it
+                        if processed_chunks == 0 and full_text:
+                            logger.info("Using full text as one segment since no chunks were processed")
+                            segments.append({
+                                "start": chunk_info["start_time"],
+                                "end": chunk_info["start_time"] + chunk_info["duration"],
+                                "text": full_text
+                            })
+                    # Standard nested output format
+                    elif isinstance(output, dict) and 'output' in output:
                         output_content = output['output']
                         logger.info(f"Output content type: {type(output_content)}")
                         
