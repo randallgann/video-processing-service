@@ -373,17 +373,55 @@ def transcribe_chunk_replicate(chunk_info, model_type=None, model_version=None):
                 }
             )
             
-            # Handle different response formats
-            if isinstance(output, dict):
-                srt_content = output.get("transcription", "")
-            elif isinstance(output, str):
-                srt_content = output
-            else:
-                logger.warning(f"Unexpected response type: {type(output)}")
-                srt_content = str(output) if output else ""
+            # Handle different response formats based on model type
+            segments = []
             
-            # Parse SRT and adjust timestamps
-            segments = parse_srt(srt_content, chunk_info["start_time"])
+            if is_fast_model:
+                # Fast Whisper model returns different format with timestamp chunks
+                logger.info(f"Processing Fast Whisper response format")
+                try:
+                    if isinstance(output, dict) and 'output' in output:
+                        # Check if we have chunks with timestamps
+                        if 'chunks' in output['output']:
+                            chunks_data = output['output']['chunks']
+                            logger.info(f"Found {len(chunks_data)} chunks in Fast Whisper response")
+                            
+                            for chunk in chunks_data:
+                                if 'text' in chunk and 'timestamp' in chunk and len(chunk['timestamp']) == 2:
+                                    start_time = float(chunk['timestamp'][0]) + chunk_info["start_time"]
+                                    end_time = float(chunk['timestamp'][1]) + chunk_info["start_time"]
+                                    text = chunk['text'].strip()
+                                    
+                                    segments.append({
+                                        "start": start_time,
+                                        "end": end_time,
+                                        "text": text
+                                    })
+                        else:
+                            # No chunks, use full text as one segment
+                            if 'text' in output['output']:
+                                text = output['output']['text'].strip()
+                                logger.info(f"No chunks found, using full text: {text[:50]}...")
+                                segments.append({
+                                    "start": chunk_info["start_time"],
+                                    "end": chunk_info["start_time"] + chunk_info["duration"],
+                                    "text": text
+                                })
+                except Exception as parsing_error:
+                    logger.error(f"Error parsing Fast Whisper output: {parsing_error}")
+                    logger.info(f"Raw output structure: {output.keys() if isinstance(output, dict) else type(output)}")
+            else:
+                # Standard OpenAI Whisper model returns SRT format
+                if isinstance(output, dict):
+                    srt_content = output.get("transcription", "")
+                elif isinstance(output, str):
+                    srt_content = output
+                else:
+                    logger.warning(f"Unexpected response type: {type(output)}")
+                    srt_content = str(output) if output else ""
+                
+                # Parse SRT and adjust timestamps
+                segments = parse_srt(srt_content, chunk_info["start_time"])
             
             # Create result object
             result = {
