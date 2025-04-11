@@ -2,6 +2,23 @@
 
 All notable changes to the YouTube Video Transcription Service will be documented in this file.
 
+## [1.0.1] - 2025-04-11
+
+### Fixed
+- Fixed audio chunking issue where only the first chunk was being processed correctly
+- Modified FFmpeg command to re-encode MP3 chunks instead of using copy codec, ensuring proper chunk generation
+- Added improved error detection and logging for FFmpeg processes
+- Added comprehensive support for Fast Whisper model response format
+- Enhanced logging throughout the processing pipeline to better diagnose issues
+- Added fallback mechanisms to extract transcript text when segments aren't available
+- Improved error recovery when processing Fast Whisper model responses
+
+### Modified
+- Enhanced the transcription processing code to handle both OpenAI and Fast Whisper model formats
+- Added detailed diagnostic logs for debugging API responses
+- Improved robustness of segment processing to prevent empty final outputs
+- Added more verbose logging to track data flow through the entire pipeline
+
 ## [1.0.0] - 2025-04-09
 
 ### Architecture Change

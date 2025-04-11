@@ -378,38 +378,102 @@ def transcribe_chunk_replicate(chunk_info, model_type=None, model_version=None):
             
             if is_fast_model:
                 # Fast Whisper model returns different format with timestamp chunks
-                logger.info(f"Processing Fast Whisper response format")
+                logger.info(f"Processing Fast Whisper response format for chunk {chunk_info['id']}")
+                logger.info(f"Response type: {type(output)}")
+                
+                # Log the raw response structure for diagnostics
+                if isinstance(output, dict):
+                    logger.info(f"Fast Whisper output keys: {list(output.keys())}")
+                    # Output part of the text to help debug
+                    if 'output' in output and isinstance(output['output'], dict) and 'text' in output['output']:
+                        text_sample = output['output']['text'][:200] if output['output']['text'] else "EMPTY TEXT"
+                        logger.info(f"Text sample: {text_sample}...")
+                    # Additional diagnostic info
+                    if 'logs' in output:
+                        logger.info(f"Response logs: {output['logs'][:200]}...")
+                
                 try:
                     if isinstance(output, dict) and 'output' in output:
-                        # Check if we have chunks with timestamps
-                        if 'chunks' in output['output']:
-                            chunks_data = output['output']['chunks']
-                            logger.info(f"Found {len(chunks_data)} chunks in Fast Whisper response")
-                            
-                            for chunk in chunks_data:
-                                if 'text' in chunk and 'timestamp' in chunk and len(chunk['timestamp']) == 2:
-                                    start_time = float(chunk['timestamp'][0]) + chunk_info["start_time"]
-                                    end_time = float(chunk['timestamp'][1]) + chunk_info["start_time"]
-                                    text = chunk['text'].strip()
-                                    
+                        output_content = output['output']
+                        logger.info(f"Output content type: {type(output_content)}")
+                        
+                        if isinstance(output_content, dict):
+                            # Check if we have chunks with timestamps
+                            if 'chunks' in output_content:
+                                chunks_data = output_content['chunks']
+                                logger.info(f"Found {len(chunks_data)} chunks in Fast Whisper response")
+                                
+                                for i, chunk in enumerate(chunks_data[:3]):  # Log first 3 chunks for sample
+                                    logger.info(f"Chunk {i} data: {chunk}")
+                                
+                                processed_chunks = 0
+                                for chunk in chunks_data:
+                                    if 'text' in chunk and 'timestamp' in chunk and len(chunk['timestamp']) == 2:
+                                        start_time = float(chunk['timestamp'][0]) + chunk_info["start_time"]
+                                        end_time = float(chunk['timestamp'][1]) + chunk_info["start_time"]
+                                        text = chunk['text'].strip()
+                                        
+                                        segments.append({
+                                            "start": start_time,
+                                            "end": end_time,
+                                            "text": text
+                                        })
+                                        processed_chunks += 1
+                                
+                                logger.info(f"Successfully processed {processed_chunks} chunks from Fast Whisper")
+                            else:
+                                # No chunks, use full text as one segment
+                                if 'text' in output_content:
+                                    text = output_content['text'].strip()
+                                    logger.info(f"No chunks found, using full text: {text[:50]}...")
                                     segments.append({
-                                        "start": start_time,
-                                        "end": end_time,
+                                        "start": chunk_info["start_time"],
+                                        "end": chunk_info["start_time"] + chunk_info["duration"],
                                         "text": text
                                     })
+                                    logger.info("Created one segment from full text")
+                                else:
+                                    logger.error("No 'text' field found in output_content")
                         else:
-                            # No chunks, use full text as one segment
-                            if 'text' in output['output']:
-                                text = output['output']['text'].strip()
-                                logger.info(f"No chunks found, using full text: {text[:50]}...")
+                            # If output_content is a string, treat it as the text
+                            if isinstance(output_content, str):
+                                text = output_content.strip()
+                                logger.info(f"Output is direct string: {text[:50]}...")
                                 segments.append({
                                     "start": chunk_info["start_time"],
                                     "end": chunk_info["start_time"] + chunk_info["duration"],
                                     "text": text
                                 })
+                                logger.info("Created one segment from string output")
+                    elif isinstance(output, str):
+                        # Handle case where output is directly a string
+                        text = output.strip()
+                        logger.info(f"Output is directly a string: {text[:50]}...")
+                        segments.append({
+                            "start": chunk_info["start_time"],
+                            "end": chunk_info["start_time"] + chunk_info["duration"],
+                            "text": text
+                        })
+                        logger.info("Created one segment from direct string output")
                 except Exception as parsing_error:
                     logger.error(f"Error parsing Fast Whisper output: {parsing_error}")
-                    logger.info(f"Raw output structure: {output.keys() if isinstance(output, dict) else type(output)}")
+                    logger.error(f"Raw output structure: {output}")
+                    # Make a best effort to extract text from whatever we have
+                    try:
+                        if isinstance(output, dict):
+                            if 'output' in output and isinstance(output['output'], dict) and 'text' in output['output']:
+                                text = output['output']['text'].strip()
+                                logger.info(f"Recovered text from error: {text[:50]}...")
+                                segments.append({
+                                    "start": chunk_info["start_time"],
+                                    "end": chunk_info["start_time"] + chunk_info["duration"],
+                                    "text": text
+                                })
+                                logger.info("Created recovery segment")
+                    except Exception as recovery_error:
+                        logger.error(f"Failed to recover text: {recovery_error}")
+                
+                logger.info(f"Final segments count from Fast Whisper: {len(segments)}")
             else:
                 # Standard OpenAI Whisper model returns SRT format
                 if isinstance(output, dict):
@@ -581,6 +645,19 @@ def combine_transcription_results(results, video_info):
     Returns:
         Combined transcript document
     """
+    logger.info(f"Combining transcription results: {len(results)} chunks to process")
+    logger.info(f"Video info: {video_info}")
+    
+    # Debug log of results structure
+    for i, result in enumerate(results[:3]):  # Log first 3 results as sample
+        logger.info(f"Result {i} structure: {list(result.keys())}")
+        if 'segments' in result:
+            logger.info(f"Result {i} has {len(result['segments'])} segments")
+            if result['segments']:
+                logger.info(f"First segment sample: {result['segments'][0]}")
+        else:
+            logger.info(f"Result {i} has NO segments!")
+    
     # First, sort results by start_time to ensure proper order
     results.sort(key=lambda x: x.get("start_time", 0))
     
@@ -589,6 +666,27 @@ def combine_transcription_results(results, video_info):
     for result in results:
         if not result.get("failed", False) and "segments" in result:
             all_segments.extend(result["segments"])
+    
+    logger.info(f"Combined {len(all_segments)} segments from all results")
+    
+    # If no segments were found, let's attempt to create segments from transcript_text
+    if not all_segments:
+        logger.warning("No segments found in results, attempting to create segments from transcript_text")
+        for result in results:
+            if not result.get("failed", False) and "transcript_text" in result:
+                # Create a single segment for this chunk
+                all_segments.append({
+                    "start": result.get("start_time", 0),
+                    "end": result.get("start_time", 0) + result.get("duration", 300),
+                    "text": result["transcript_text"]
+                })
+        logger.info(f"Created {len(all_segments)} fallback segments from transcript_text")
+    
+    # Still no segments? Log the entire results for debugging
+    if not all_segments:
+        logger.error(f"Still no segments after fallback, dumping results:")
+        for i, result in enumerate(results):
+            logger.error(f"Full Result {i}: {result}")
     
     # Sort segments by start time
     all_segments.sort(key=lambda x: x["start"])
@@ -624,6 +722,8 @@ def combine_transcription_results(results, video_info):
             "end_time": current_end,
             "text": chunk_text
         })
+    
+    logger.info(f"Created {len(segments_for_vector)} vector-ready segments")
     
     # Prepare final output
     final_output = []
@@ -998,12 +1098,25 @@ def process_message(message):
             start_time=start_time
         )
         
+        # Log information about the transcription results
+        logger.info(f"Model type used: {model_type}")
+        logger.info(f"Transcription results count: {len(transcription_results)}")
+        
         final_transcript = combine_transcription_results(transcription_results, video_info)
+        
+        # Log results of the combination
+        logger.info(f"Final transcript entries count: {len(final_transcript)}")
+        if not final_transcript:
+            logger.error("CRITICAL: Final transcript is empty!")
+        else:
+            logger.info(f"First transcript entry sample: {final_transcript[0]}")
         
         # Save combined results
         result_file_path = os.path.join(work_dir, f"transcript_{video_info['id'] or 'result'}.json")
         with open(result_file_path, 'w', encoding='utf-8') as f:
             json.dump(final_transcript, f, indent=2)
+        
+        logger.info(f"Saved results to {result_file_path}")
         
         publish_progress(
             message_id=message_id,
