@@ -906,6 +906,48 @@ def publish_progress(message_id, video_url, status, progress_percent,
     except Exception as e:
         logger.error(f"Error publishing progress update: {e}")
 
+def delete_gcs_chunks(bucket_name, message_id):
+    """
+    Delete audio chunks from GCS after successful transcription
+    
+    Args:
+        bucket_name: Name of the GCS bucket
+        message_id: ID of the message for identifying folder structure
+        
+    Returns:
+        Number of deleted blobs
+    """
+    try:
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(bucket_name)
+        
+        # List all blobs in the chunks directory
+        prefix = f"{message_id}/chunks/"
+        blobs = list(bucket.list_blobs(prefix=prefix))
+        
+        if not blobs:
+            logger.warning(f"No audio chunks found to delete in gs://{bucket_name}/{prefix}")
+            return 0
+            
+        logger.info(f"Deleting {len(blobs)} audio chunks from gs://{bucket_name}/{prefix}")
+        
+        # Delete blobs in batches
+        deleted_count = 0
+        for blob in blobs:
+            try:
+                blob.delete()
+                deleted_count += 1
+            except Exception as blob_error:
+                logger.warning(f"Failed to delete blob {blob.name}: {blob_error}")
+        
+        logger.info(f"Successfully deleted {deleted_count} audio chunks")
+        return deleted_count
+        
+    except Exception as e:
+        logger.error(f"Error deleting audio chunks: {e}")
+        # Don't raise the exception to avoid failing the whole process
+        return 0
+
 def upload_results(result_file_path, bucket_name, message_id):
     """
     Upload final results to GCS
@@ -1220,6 +1262,21 @@ def process_message(message):
         
         result_url = upload_results(result_file_path, BUCKET_NAME, message_id)
         
+        # 7. Clean up audio chunks from GCS
+        publish_progress(
+            message_id=message_id,
+            video_url=video_url,
+            status="processing",
+            progress_percent=99,
+            current_stage="cleanup",
+            stage_progress_percent=0,
+            start_time=start_time
+        )
+        
+        # Delete audio chunks now that we have the final transcript
+        deleted_count = delete_gcs_chunks(AUDIO_CHUNKS_BUCKET, message_id)
+        logger.info(f"Cleanup completed: {deleted_count} audio chunks deleted from GCS")
+        
         # Final progress update - Completed
         publish_progress(
             message_id=message_id,
@@ -1235,6 +1292,7 @@ def process_message(message):
         message.ack()
         logger.info(f"Successfully processed message {message_id}")
         logger.info(f"Results available at: {result_url}")
+        logger.info(f"Audio chunks cleanup: {deleted_count} files removed from GCS")
         
     except Exception as e:
         logger.error(f"Error processing message: {e}")

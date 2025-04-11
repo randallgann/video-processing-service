@@ -2,6 +2,13 @@
 
 All notable changes to the YouTube Video Transcription Service will be documented in this file.
 
+## [1.0.5] - 2025-04-11
+
+### Added
+- Added automatic cleanup of audio chunks from GCS after successful transcription
+- Added new progress stage for cleanup operations
+- Implemented GCS directory listing and safe blob deletion
+
 ## [1.0.4] - 2025-04-11
 
 ### Fixed
