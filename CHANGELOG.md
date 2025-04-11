@@ -2,6 +2,14 @@
 
 All notable changes to the YouTube Video Transcription Service will be documented in this file.
 
+## [1.0.3] - 2025-04-11
+
+### Enhanced
+- Added comprehensive INFO-level logging for PubSub progress updates
+- Improved visibility of progress reporting in logs
+- Added startup verification of PubSub topic availability
+- Added detailed transcription progress monitoring logs
+
 ## [1.0.2] - 2025-04-11
 
 ### Fixed

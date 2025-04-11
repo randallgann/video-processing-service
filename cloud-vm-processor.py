@@ -826,8 +826,10 @@ def publish_progress(message_id, video_url, status, progress_percent,
         error: Error message, if any
     """
     if not PROGRESS_TOPIC_ID:
-        logger.debug("Progress reporting disabled (PROGRESS_TOPIC_ID not set)")
+        logger.info("Progress reporting disabled (PROGRESS_TOPIC_ID not set)")
         return
+    
+    logger.info(f"Preparing progress update: {current_stage} at {progress_percent}%")
         
     try:
         publisher = pubsub_v1.PublisherClient()
@@ -862,9 +864,12 @@ def publish_progress(message_id, video_url, status, progress_percent,
         # Publish message
         message_json = json.dumps(progress_message)
         future = publisher.publish(topic_path, data=message_json.encode('utf-8'))
-        message_id = future.result()
+        pub_message_id = future.result()
         
-        logger.debug(f"Published progress update: {progress_message}")
+        # Log at INFO level so it appears in standard logs
+        logger.info(f"Published progress update to {PROGRESS_TOPIC_ID}: status={status}, stage={current_stage}, progress={progress_percent}%")
+        # Keep the detailed debug log for troubleshooting if needed
+        logger.debug(f"Full progress message: {progress_message}")
         
     except Exception as e:
         logger.error(f"Error publishing progress update: {e}")
@@ -1080,6 +1085,7 @@ def process_message(message):
             progress = 0
             while not stop_progress_monitor.is_set() and progress < 100:
                 transcription_progress_callback(progress)
+                logger.info(f"Transcription background progress update: {progress}% complete")
                 progress += 5  # Increment by 5% each time
                 progress = min(progress, 95)  # Never reach 100% in monitoring thread
                 stop_progress_monitor.wait(30)  # Update every 30 seconds
@@ -1284,8 +1290,16 @@ def check_environment():
     except:
         logger.warning("Fast Whisper model not properly configured")
     
+    # Check progress topic configuration
     if PROGRESS_TOPIC_ID:
         logger.info(f"Progress reporting enabled to topic: {PROGRESS_TOPIC_ID}")
+        # Test if we can create a publisher client for the topic
+        try:
+            publisher = pubsub_v1.PublisherClient()
+            topic_path = publisher.topic_path(PROJECT_ID, PROGRESS_TOPIC_ID)
+            logger.info(f"Progress updates will be published to: {topic_path}")
+        except Exception as e:
+            logger.error(f"Error setting up progress publisher: {e}")
     else:
         logger.warning("Progress reporting disabled (PROGRESS_TOPIC_ID not set)")
     
