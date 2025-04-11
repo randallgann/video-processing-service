@@ -219,18 +219,24 @@ def split_audio(audio_path, output_dir, chunk_length=300, use_wav=False):
                 chunk_output
             ]
         else:
-            # For MP3, we can try to copy codec for speed
+            # For MP3, use re-encoding instead of copy to ensure proper chunking
             cmd = [
                 "ffmpeg",
                 "-y",  # overwrite
                 "-i", audio_path,
                 "-ss", str(start),
                 "-t", str(chunk_length),
-                "-c", "copy",
+                "-acodec", "libmp3lame",  # Use MP3 encoding
+                "-ar", "44100",           # Standard audio rate
+                "-ab", "128k",            # Bitrate
                 chunk_output
             ]
         
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Run ffmpeg and capture output for error logging
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            logger.error(f"Failed to create chunk: {chunk_output}")
+            logger.error(f"FFmpeg error: {result.stderr}")
         
         if os.path.exists(chunk_output):
             chunk_info = {
