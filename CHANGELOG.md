@@ -2,6 +2,14 @@
 
 All notable changes to the YouTube Video Transcription Service will be documented in this file.
 
+## [1.0.4] - 2025-04-11
+
+### Fixed
+- Fixed error handling for Fast Whisper chunks with missing or invalid timestamps
+- Added fallback timing calculation for chunks with invalid timestamps
+- Prevented dumping of large raw data to logs on error
+- Added graceful handling of malformed chunk data
+
 ## [1.0.3] - 2025-04-11
 
 ### Enhanced

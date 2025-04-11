@@ -449,17 +449,39 @@ def transcribe_chunk_replicate(chunk_info, model_type=None, model_version=None):
                                 
                                 processed_chunks = 0
                                 for chunk in chunks_data:
-                                    if 'text' in chunk and 'timestamp' in chunk and len(chunk['timestamp']) == 2:
-                                        start_time = float(chunk['timestamp'][0]) + chunk_info["start_time"]
-                                        end_time = float(chunk['timestamp'][1]) + chunk_info["start_time"]
-                                        text = chunk['text'].strip()
-                                        
-                                        segments.append({
-                                            "start": start_time,
-                                            "end": end_time,
-                                            "text": text
-                                        })
-                                        processed_chunks += 1
+                                    try:
+                                        if ('text' in chunk and 'timestamp' in chunk and 
+                                            len(chunk['timestamp']) == 2 and 
+                                            chunk['timestamp'][0] is not None and 
+                                            chunk['timestamp'][1] is not None):
+                                            
+                                            start_time = float(chunk['timestamp'][0]) + chunk_info["start_time"]
+                                            end_time = float(chunk['timestamp'][1]) + chunk_info["start_time"]
+                                            text = chunk['text'].strip()
+                                            
+                                            segments.append({
+                                                "start": start_time,
+                                                "end": end_time,
+                                                "text": text
+                                            })
+                                            processed_chunks += 1
+                                        elif 'text' in chunk:
+                                            # Handle chunks with missing/invalid timestamps
+                                            # Use the chunk_info start_time and an estimated duration
+                                            logger.warning(f"Chunk has invalid timestamp: {chunk.get('timestamp')}, using default timing")
+                                            text = chunk['text'].strip()
+                                            
+                                            # Calculate approximate duration based on text length
+                                            approx_duration = len(text.split()) * 0.5  # ~0.5 seconds per word
+                                            
+                                            segments.append({
+                                                "start": chunk_info["start_time"],
+                                                "end": chunk_info["start_time"] + approx_duration,
+                                                "text": text
+                                            })
+                                            processed_chunks += 1
+                                    except (ValueError, TypeError) as e:
+                                        logger.warning(f"Error processing chunk: {str(e)}, skipping")
                                 
                                 logger.info(f"Successfully processed {processed_chunks} chunks from Fast Whisper")
                             else:
@@ -498,7 +520,17 @@ def transcribe_chunk_replicate(chunk_info, model_type=None, model_version=None):
                         logger.info("Created one segment from direct string output")
                 except Exception as parsing_error:
                     logger.error(f"Error parsing Fast Whisper output: {parsing_error}")
-                    logger.error(f"Raw output structure: {output}")
+                    
+                    # Log the structure of the output without the full content
+                    if isinstance(output, dict):
+                        keys = list(output.keys())
+                        logger.error(f"Output keys: {keys}")
+                        if 'chunks' in output:
+                            chunk_count = len(output['chunks'])
+                            logger.error(f"Found {chunk_count} chunks, first few have issues")
+                    else:
+                        logger.error(f"Output type: {type(output)}")
+                    
                     # Make a best effort to extract text from whatever we have
                     try:
                         if isinstance(output, dict):
