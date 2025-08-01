@@ -48,6 +48,7 @@ SUBSCRIPTION_ID = os.environ.get('SUBSCRIPTION_ID')
 BUCKET_NAME = os.environ.get('BUCKET_NAME')
 AUDIO_CHUNKS_BUCKET = os.environ.get('AUDIO_CHUNKS_BUCKET', 'rag-widget-audio-chunks')
 PROGRESS_TOPIC_ID = os.environ.get('PROGRESS_TOPIC_ID', '')
+RESULTS_TOPIC_ID = os.environ.get('RESULTS_TOPIC_ID', '')
 MAX_MESSAGES = int(os.environ.get('MAX_MESSAGES', '1'))
 CHUNK_LENGTH_SECONDS = int(os.environ.get('CHUNK_LENGTH_SECONDS', '300'))  # 5 minutes by default
 MAX_CONCURRENT_UPLOADS = int(os.environ.get('MAX_CONCURRENT_UPLOADS', '5'))
@@ -906,6 +907,58 @@ def publish_progress(message_id, video_url, status, progress_percent,
     except Exception as e:
         logger.error(f"Error publishing progress update: {e}")
 
+def publish_completion_result(message_id, video_url, status, transcript_location=None, error=None):
+    """
+    Publish completion result to the results topic for memory import processing
+    
+    Args:
+        message_id: Original message ID
+        video_url: YouTube video URL
+        status: 'completed' or 'failed'
+        transcript_location: GCS path to transcript JSON file (for successful completions)
+        error: Error message (for failed completions)
+    """
+    if not RESULTS_TOPIC_ID:
+        logger.info("Results publishing disabled (RESULTS_TOPIC_ID not set)")
+        return
+    
+    logger.info(f"Publishing completion result: status={status}, location={transcript_location}")
+        
+    try:
+        publisher = pubsub_v1.PublisherClient()
+        topic_path = publisher.topic_path(PROJECT_ID, RESULTS_TOPIC_ID)
+        
+        # Extract video_id from URL
+        video_id = extract_video_id(video_url)
+        
+        # Construct completion message
+        completion_message = {
+            "message_id": message_id,
+            "video_id": video_id,
+            "video_url": video_url,
+            "status": status,
+            "timestamp": datetime.datetime.utcnow().isoformat() + "Z"
+        }
+        
+        # Add transcript location for successful completions
+        if status == "completed" and transcript_location:
+            completion_message["transcript_location"] = transcript_location
+        
+        # Add error for failed completions
+        if status == "failed" and error:
+            completion_message["error"] = error
+        
+        # Publish message
+        message_json = json.dumps(completion_message)
+        future = publisher.publish(topic_path, data=message_json.encode('utf-8'))
+        pub_message_id = future.result()
+        
+        logger.info(f"Published completion result to {RESULTS_TOPIC_ID}: status={status}, video_id={video_id}")
+        logger.debug(f"Full completion message: {completion_message}")
+        
+    except Exception as e:
+        logger.error(f"Error publishing completion result: {e}")
+
 def delete_gcs_chunks(bucket_name, message_id):
     """
     Delete audio chunks from GCS after successful transcription
@@ -1267,7 +1320,7 @@ def process_message(message):
             message_id=message_id,
             video_url=video_url,
             status="processing",
-            progress_percent=99,
+            progress_percent=88,
             current_stage="cleanup",
             stage_progress_percent=0,
             start_time=start_time
@@ -1277,15 +1330,25 @@ def process_message(message):
         deleted_count = delete_gcs_chunks(AUDIO_CHUNKS_BUCKET, message_id)
         logger.info(f"Cleanup completed: {deleted_count} audio chunks deleted from GCS")
         
-        # Final progress update - Completed
+        # Final progress update - Transcription completed (90%)
+        # Memory import will handle 90% → 100%
         publish_progress(
             message_id=message_id,
             video_url=video_url,
-            status="completed",
-            progress_percent=100,
-            current_stage="completed",
+            status="processing",
+            progress_percent=90,
+            current_stage="transcription_completed",
             stage_progress_percent=100,
             start_time=start_time
+        )
+        
+        # Publish completion result for memory import processing
+        transcript_gcs_path = f"gs://{BUCKET_NAME}/{message_id}/results/{os.path.basename(result_file_path)}"
+        publish_completion_result(
+            message_id=message_id,
+            video_url=video_url,
+            status="completed",
+            transcript_location=transcript_gcs_path
         )
         
         # Acknowledge the message
@@ -1306,6 +1369,14 @@ def process_message(message):
                 current_stage="error",
                 stage_progress_percent=0,
                 start_time=start_time,
+                error=str(e)
+            )
+            
+            # Publish failure result for memory import processing
+            publish_completion_result(
+                message_id=message_id,
+                video_url=video_url,
+                status="failed",
                 error=str(e)
             )
             
@@ -1392,6 +1463,19 @@ def check_environment():
             logger.error(f"Error setting up progress publisher: {e}")
     else:
         logger.warning("Progress reporting disabled (PROGRESS_TOPIC_ID not set)")
+    
+    # Check results topic configuration
+    if RESULTS_TOPIC_ID:
+        logger.info(f"Results publishing enabled to topic: {RESULTS_TOPIC_ID}")
+        # Test if we can create a publisher client for the topic
+        try:
+            publisher = pubsub_v1.PublisherClient()
+            topic_path = publisher.topic_path(PROJECT_ID, RESULTS_TOPIC_ID)
+            logger.info(f"Completion results will be published to: {topic_path}")
+        except Exception as e:
+            logger.error(f"Error setting up results publisher: {e}")
+    else:
+        logger.warning("Results publishing disabled (RESULTS_TOPIC_ID not set)")
     
     return True
 

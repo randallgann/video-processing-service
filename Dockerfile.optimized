@@ -1,0 +1,45 @@
+FROM ubuntu:22.04
+
+# Install system dependencies (only what's needed)
+RUN apt-get update && apt-get install -y \
+    python3 python3-pip ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set up working directory
+WORKDIR /app
+
+# Copy optimized requirements
+COPY requirements-optimized.txt ./requirements.txt
+
+# Install Python dependencies (much smaller now)
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY cloud-vm-processor.py /app/
+COPY yt-dlp-aduio-processor-v1.py /app/
+COPY transcribe-whisper-replicate.py /app/
+COPY debug-replicate.py /app/
+COPY monitor-progress.py /app/
+
+# Create credentials directory (will be mounted at runtime)
+RUN mkdir -p /app/credentials
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV USE_WAV_FORMAT=true
+ENV CHUNK_LENGTH_SECONDS=300
+ENV MAX_CONCURRENT_UPLOADS=5
+ENV MAX_CONCURRENT_TRANSCRIPTIONS=5
+ENV DEFAULT_MODEL_TYPE=openai
+
+# Create non-root user for security
+RUN useradd -m -u 1000 transcriber
+RUN chown -R transcriber:transcriber /app
+USER transcriber
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python3 -c "import requests; import sys; sys.exit(0)" || exit 1
+
+# Default command
+CMD ["python3", "cloud-vm-processor.py"]

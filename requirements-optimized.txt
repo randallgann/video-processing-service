@@ -1,0 +1,20 @@
+# Core dependencies for Replicate API-based transcription
+yt-dlp>=2023.3.4
+replicate>=0.20.0
+requests>=2.28.0
+tqdm>=4.65.0
+
+# Audio processing (lightweight)
+pydub>=0.25.1
+ffmpeg-python>=0.2.0
+
+# Google Cloud services
+google-cloud-pubsub>=2.13.0
+google-cloud-storage>=2.5.0
+google-auth>=2.15.0
+
+# Utilities
+python-dotenv>=1.0.0
+
+# Minimal numpy for basic operations (if needed by pydub/ffmpeg-python)
+# numpy>=1.20.0  # Uncomment only if actually needed

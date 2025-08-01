@@ -2,6 +2,23 @@
 
 All notable changes to the YouTube Video Transcription Service will be documented in this file.
 
+## [1.1.0] - 2025-07-08
+
+### Added
+- **Vector Integration Support**: Added publishing to `video-processing-results` topic for transcript-to-vector pipeline
+- **New Function**: `publish_completion_result()` publishes completion messages with transcript GCS location
+- **Environment Variable**: `RESULTS_TOPIC_ID` for configuring results topic
+- **Kubernetes Configuration**: Added RESULTS_TOPIC_ID mapping in deployment YAML
+
+### Changed
+- **Progress Tracking**: Transcription now completes at 90% instead of 100% to allow vector processing
+- **Final Stage**: Changed from "completed" to "transcription_completed" at 90%
+- **Error Handling**: Failed transcriptions now publish to results topic for proper handling
+
+### Architecture
+- Transcription service now triggers downstream vector processing via Pub/Sub
+- Enables automatic embedding generation and Qdrant storage through API service integration
+
 ## [1.0.5] - 2025-04-11
 
 ### Added
