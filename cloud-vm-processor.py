@@ -28,6 +28,8 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 from google.cloud import pubsub_v1
 from google.cloud import storage
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import socketserver
 
 # Load environment variables
 load_dotenv()
@@ -57,6 +59,77 @@ OPENAI_WHISPER = os.environ.get('OPENAI_WHISPER', '')
 FAST_WHISPER = os.environ.get('FAST_WHISPER', '')
 DEFAULT_MODEL_TYPE = os.environ.get('DEFAULT_MODEL_TYPE', 'openai')  # 'openai' or 'fast'
 USE_WAV_FORMAT = os.environ.get('USE_WAV_FORMAT', '').lower() in ('true', '1', 'yes')
+HTTP_PORT = int(os.environ.get('PORT', '8080'))
+METRICS_PORT = int(os.environ.get('METRICS_PORT', '9090'))
+
+# Global service status
+service_ready = False
+service_healthy = False
+
+class HealthHandler(BaseHTTPRequestHandler):
+    """HTTP request handler for health and readiness endpoints"""
+    
+    def do_GET(self):
+        global service_ready, service_healthy
+        
+        if self.path == '/health':
+            # Health check - service is healthy if it can process requests
+            if service_healthy:
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "healthy"}).encode())
+            else:
+                self.send_response(503)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "unhealthy"}).encode())
+                
+        elif self.path == '/ready':
+            # Readiness check - service is ready if it can accept new requests
+            if service_ready:
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "ready"}).encode())
+            else:
+                self.send_response(503)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "not ready"}).encode())
+                
+        else:
+            self.send_response(404)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "Not found"}).encode())
+    
+    def log_message(self, format, *args):
+        # Override to use our logger instead of printing to stderr
+        logger.debug(f"Health endpoint: {format % args}")
+
+def start_health_server():
+    """Start the health check HTTP server in a separate thread"""
+    global service_ready, service_healthy
+    
+    try:
+        server = HTTPServer(('0.0.0.0', HTTP_PORT), HealthHandler)
+        logger.info(f"Health server starting on port {HTTP_PORT}")
+        
+        # Mark service as healthy once server starts
+        service_healthy = True
+        
+        # Start server in a separate thread
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        
+        logger.info(f"Health server running on http://0.0.0.0:{HTTP_PORT}")
+        return server
+        
+    except Exception as e:
+        logger.error(f"Failed to start health server: {e}")
+        service_healthy = False
+        raise
 
 def get_model_info(model_type=None, model_version=None):
     """
@@ -1481,37 +1554,59 @@ def check_environment():
 
 def main():
     """Main processing loop"""
+    global service_ready, service_healthy
+    
     # Check environment variables
     if not check_environment():
         sys.exit(1)
     
     logger.info("Starting video transcription service")
     
+    # Start health server first
+    try:
+        health_server = start_health_server()
+        logger.info("Health endpoints available at /health and /ready")
+    except Exception as e:
+        logger.error(f"Failed to start health server: {e}")
+        sys.exit(1)
+    
     # Create Pub/Sub subscriber client
-    subscriber = pubsub_v1.SubscriberClient()
-    subscription_path = subscriber.subscription_path(PROJECT_ID, SUBSCRIPTION_ID)
-    
-    # Configure flow control to limit concurrent messages
-    flow_control = pubsub_v1.types.FlowControl(max_messages=MAX_MESSAGES)
-    
-    def callback(message):
-        process_message(message)
-    
-    # Subscribe to the subscription
-    streaming_pull_future = subscriber.subscribe(
-        subscription_path, callback=callback, flow_control=flow_control
-    )
-    
-    logger.info(f"Listening for messages on {subscription_path}")
+    try:
+        subscriber = pubsub_v1.SubscriberClient()
+        subscription_path = subscriber.subscription_path(PROJECT_ID, SUBSCRIPTION_ID)
+        
+        # Configure flow control to limit concurrent messages
+        flow_control = pubsub_v1.types.FlowControl(max_messages=MAX_MESSAGES)
+        
+        def callback(message):
+            process_message(message)
+        
+        # Subscribe to the subscription
+        streaming_pull_future = subscriber.subscribe(
+            subscription_path, callback=callback, flow_control=flow_control
+        )
+        
+        # Mark service as ready once Pub/Sub subscription is active
+        service_ready = True
+        logger.info(f"Service ready - listening for messages on {subscription_path}")
+        
+    except Exception as e:
+        logger.error(f"Failed to set up Pub/Sub subscription: {e}")
+        service_healthy = False
+        sys.exit(1)
     
     try:
         # Keep the main thread from exiting
         streaming_pull_future.result()
     except KeyboardInterrupt:
+        service_ready = False
+        service_healthy = False
         streaming_pull_future.cancel()
         logger.info("Subscription canceled")
     except Exception as e:
         logger.error(f"Streaming pull error: {e}")
+        service_ready = False
+        service_healthy = False
         streaming_pull_future.cancel()
         raise
 
