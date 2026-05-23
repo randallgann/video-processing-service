@@ -345,12 +345,16 @@ def upload_to_gcs(file_path, bucket_name, destination_blob_name):
         
         # Upload the file
         blob.upload_from_filename(file_path)
-        
-        # Make the file publicly accessible
-        blob.make_public()
-        
+
         logger.info(f"File {file_path} uploaded to gs://{bucket_name}/{destination_blob_name}")
-        return blob.public_url
+        # The prod buckets use uniform bucket-level access (UBLA), which rejects legacy
+        # per-object ACLs (blob.make_public). Return a time-limited V4 signed URL instead —
+        # works without public access and is signed locally via the mounted SA key.
+        return blob.generate_signed_url(
+            version="v4",
+            expiration=datetime.timedelta(hours=6),
+            method="GET",
+        )
         
     except Exception as e:
         logger.error(f"Error uploading to GCS: {e}")
