@@ -1,11 +1,12 @@
 import yt_dlp
 import os
+import shutil
 
 def download_audio(url, download_path="./"):
     """
     Downloads YouTube audio using yt-dlp
     """
-    
+
     # Ensure download_path is an absolute path
     download_path = os.path.abspath(download_path)
     print(f"Using download path: {download_path}")
@@ -19,13 +20,38 @@ def download_audio(url, download_path="./"):
         'no_warnings': False,
         'extract_flat': False,
         'restrictfilenames': True,
+        # Allow yt-dlp to fetch the EJS challenge-solver script (run via deno) so the
+        # YouTube nsig "n challenge" can be solved; without it format extraction fails
+        # with "Requested format is not available".
+        'remote_components': ['ejs:github'],
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
             'preferredquality': '192'
         }]
     }
-    
+
+    # YouTube blocks datacenter IPs ("Sign in to confirm you're not a bot") unless a
+    # logged-in session cookie file is supplied. Mounted as a read-only secret, so copy
+    # it to a writable path first (yt-dlp rewrites the cookie jar on exit).
+    cookies_src = os.environ.get('YOUTUBE_COOKIES_FILE', '/var/secrets/youtube/cookies.txt')
+    if os.path.exists(cookies_src):
+        cookies_rw = os.path.join(download_path, 'yt-cookies.txt')
+        try:
+            shutil.copyfile(cookies_src, cookies_rw)
+            ydl_opts['cookiefile'] = cookies_rw
+        except Exception as copy_err:
+            print(f"WARNING: could not copy cookies to writable path ({copy_err}); using source")
+            ydl_opts['cookiefile'] = cookies_src
+        ydl_opts['user_agent'] = (
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+            '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        )
+        print(f"Using YouTube cookies from {cookies_src}")
+    else:
+        print(f"WARNING: YouTube cookies file not found at {cookies_src}; "
+              f"downloads may fail with bot-detection")
+
     try:
         # Download the video
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
