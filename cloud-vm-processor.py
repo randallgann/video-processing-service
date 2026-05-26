@@ -919,12 +919,12 @@ def extract_video_id(video_url):
     
     return video_id
 
-def publish_progress(message_id, video_url, status, progress_percent, 
-                    current_stage, stage_progress_percent, 
-                    start_time, error=None):
+def publish_progress(message_id, video_url, status, progress_percent,
+                    current_stage, stage_progress_percent,
+                    start_time, error=None, db_video_id=None):
     """
     Publish progress update to Pub/Sub
-    
+
     Args:
         message_id: Original message ID
         video_url: YouTube video URL
@@ -934,19 +934,20 @@ def publish_progress(message_id, video_url, status, progress_percent,
         stage_progress_percent: Progress percentage of current stage
         start_time: Processing start time
         error: Error message, if any
+        db_video_id: DB UUID from request payload (echoed as video_id when present)
     """
     if not PROGRESS_TOPIC_ID:
         logger.info("Progress reporting disabled (PROGRESS_TOPIC_ID not set)")
         return
-    
+
     logger.info(f"Preparing progress update: {current_stage} at {progress_percent}%")
-        
+
     try:
         publisher = pubsub_v1.PublisherClient()
         topic_path = publisher.topic_path(PROJECT_ID, PROGRESS_TOPIC_ID)
-        
-        # Extract video_id from URL
-        video_id = extract_video_id(video_url)
+
+        # Use DB UUID if available, fall back to YouTube ID for legacy/manual/demo requests
+        video_id = db_video_id if db_video_id else extract_video_id(video_url)
         
         processing_time_seconds = int(time.time() - start_time)
         
@@ -984,29 +985,30 @@ def publish_progress(message_id, video_url, status, progress_percent,
     except Exception as e:
         logger.error(f"Error publishing progress update: {e}")
 
-def publish_completion_result(message_id, video_url, status, transcript_location=None, error=None):
+def publish_completion_result(message_id, video_url, status, transcript_location=None, error=None, db_video_id=None):
     """
     Publish completion result to the results topic for memory import processing
-    
+
     Args:
         message_id: Original message ID
         video_url: YouTube video URL
         status: 'completed' or 'failed'
         transcript_location: GCS path to transcript JSON file (for successful completions)
         error: Error message (for failed completions)
+        db_video_id: DB UUID from request payload (echoed as video_id when present)
     """
     if not RESULTS_TOPIC_ID:
         logger.info("Results publishing disabled (RESULTS_TOPIC_ID not set)")
         return
-    
+
     logger.info(f"Publishing completion result: status={status}, location={transcript_location}")
-        
+
     try:
         publisher = pubsub_v1.PublisherClient()
         topic_path = publisher.topic_path(PROJECT_ID, RESULTS_TOPIC_ID)
-        
-        # Extract video_id from URL
-        video_id = extract_video_id(video_url)
+
+        # Use DB UUID if available, fall back to YouTube ID for legacy/manual/demo requests
+        video_id = db_video_id if db_video_id else extract_video_id(video_url)
         
         # Construct completion message
         completion_message = {
@@ -1129,7 +1131,11 @@ def process_message(message):
         # If video_url is not directly in the data, check if it's in a nested 'video' object
         if not video_url and 'video' in data and isinstance(data['video'], dict):
             video_url = data['video'].get('url')
-            
+
+        # Extract DB UUID from request payload (Option A, D-07/D-08)
+        # Falls back to None for legacy/manual/demo requests that lack the nested 'video' object
+        db_video_id = data['video'].get('id') if isinstance(data.get('video'), dict) else None
+
         if not video_url:
             logger.error("Message missing video_url or video.url")
             logger.error(f"Message data: {data}")
@@ -1425,7 +1431,8 @@ def process_message(message):
             message_id=message_id,
             video_url=video_url,
             status="completed",
-            transcript_location=transcript_gcs_path
+            transcript_location=transcript_gcs_path,
+            db_video_id=db_video_id
         )
         
         # Acknowledge the message
@@ -1454,7 +1461,8 @@ def process_message(message):
                 message_id=message_id,
                 video_url=video_url,
                 status="failed",
-                error=str(e)
+                error=str(e),
+                db_video_id=db_video_id
             )
             
             # Don't retry if we made significant progress
