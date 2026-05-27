@@ -1172,9 +1172,10 @@ def process_message(message):
             progress_percent=0,
             current_stage="download",
             stage_progress_percent=0,
-            start_time=start_time
+            start_time=start_time,
+            db_video_id=db_video_id
         )
-        
+
         # 1. Download video
         publish_progress(
             message_id=message_id,
@@ -1183,7 +1184,8 @@ def process_message(message):
             progress_percent=5,
             current_stage="download",
             stage_progress_percent=20,
-            start_time=start_time
+            start_time=start_time,
+            db_video_id=db_video_id
         )
         
         audio_path, desc_path = download_video(video_url, work_dir)
@@ -1208,9 +1210,10 @@ def process_message(message):
             progress_percent=15,
             current_stage="download",
             stage_progress_percent=100,
-            start_time=start_time
+            start_time=start_time,
+            db_video_id=db_video_id
         )
-        
+
         # 2. Split audio into chunks
         publish_progress(
             message_id=message_id,
@@ -1219,7 +1222,8 @@ def process_message(message):
             progress_percent=20,
             current_stage="chunking",
             stage_progress_percent=0,
-            start_time=start_time
+            start_time=start_time,
+            db_video_id=db_video_id
         )
         
         chunks = split_audio(audio_path, work_dir, chunk_length=CHUNK_LENGTH_SECONDS, use_wav=use_wav)
@@ -1231,9 +1235,10 @@ def process_message(message):
             progress_percent=30,
             current_stage="chunking",
             stage_progress_percent=100,
-            start_time=start_time
+            start_time=start_time,
+            db_video_id=db_video_id
         )
-        
+
         # 3. Upload chunks to GCS
         publish_progress(
             message_id=message_id,
@@ -1242,7 +1247,8 @@ def process_message(message):
             progress_percent=35,
             current_stage="uploading",
             stage_progress_percent=0,
-            start_time=start_time
+            start_time=start_time,
+            db_video_id=db_video_id
         )
         
         chunks = upload_chunks(chunks, AUDIO_CHUNKS_BUCKET, message_id)
@@ -1262,9 +1268,10 @@ def process_message(message):
             progress_percent=45,
             current_stage="uploading",
             stage_progress_percent=100,
-            start_time=start_time
+            start_time=start_time,
+            db_video_id=db_video_id
         )
-        
+
         # 4. Transcribe chunks
         publish_progress(
             message_id=message_id,
@@ -1273,7 +1280,8 @@ def process_message(message):
             progress_percent=50,
             current_stage="transcription",
             stage_progress_percent=0,
-            start_time=start_time
+            start_time=start_time,
+            db_video_id=db_video_id
         )
         
         # Create a progress tracking callback
@@ -1285,7 +1293,8 @@ def process_message(message):
                 progress_percent=int(50 + progress * 0.4),  # 50-90% of overall progress
                 current_stage="transcription",
                 stage_progress_percent=progress,
-                start_time=start_time
+                start_time=start_time,
+                db_video_id=db_video_id
             )
         
         # Start a thread to periodically update progress during transcription
@@ -1341,9 +1350,10 @@ def process_message(message):
             progress_percent=90,
             current_stage="transcription",
             stage_progress_percent=100,
-            start_time=start_time
+            start_time=start_time,
+            db_video_id=db_video_id
         )
-        
+
         # 5. Combine results and format output
         publish_progress(
             message_id=message_id,
@@ -1352,7 +1362,8 @@ def process_message(message):
             progress_percent=92,
             current_stage="processing",
             stage_progress_percent=0,
-            start_time=start_time
+            start_time=start_time,
+            db_video_id=db_video_id
         )
         
         # Log information about the transcription results
@@ -1382,9 +1393,10 @@ def process_message(message):
             progress_percent=95,
             current_stage="processing",
             stage_progress_percent=100,
-            start_time=start_time
+            start_time=start_time,
+            db_video_id=db_video_id
         )
-        
+
         # 6. Upload results to GCS
         publish_progress(
             message_id=message_id,
@@ -1393,7 +1405,8 @@ def process_message(message):
             progress_percent=97,
             current_stage="finalizing",
             stage_progress_percent=0,
-            start_time=start_time
+            start_time=start_time,
+            db_video_id=db_video_id
         )
         
         result_url = upload_results(result_file_path, BUCKET_NAME, message_id)
@@ -1406,7 +1419,8 @@ def process_message(message):
             progress_percent=88,
             current_stage="cleanup",
             stage_progress_percent=0,
-            start_time=start_time
+            start_time=start_time,
+            db_video_id=db_video_id
         )
         
         # Delete audio chunks now that we have the final transcript
@@ -1422,7 +1436,8 @@ def process_message(message):
             progress_percent=90,
             current_stage="transcription_completed",
             stage_progress_percent=100,
-            start_time=start_time
+            start_time=start_time,
+            db_video_id=db_video_id
         )
         
         # Publish completion result for memory import processing
@@ -1453,7 +1468,8 @@ def process_message(message):
                 current_stage="error",
                 stage_progress_percent=0,
                 start_time=start_time,
-                error=str(e)
+                error=str(e),
+                db_video_id=db_video_id
             )
             
             # Publish failure result for memory import processing
