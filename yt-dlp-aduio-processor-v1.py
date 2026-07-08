@@ -36,11 +36,22 @@ def download_audio(url, download_path="./"):
         }]
     }
 
-    # YouTube blocks datacenter IPs ("Sign in to confirm you're not a bot") unless a
-    # logged-in session cookie file is supplied. Mounted as a read-only secret, so copy
-    # it to a writable path first (yt-dlp rewrites the cookie jar on exit).
+    # Preferred anti-bot path: route through a residential proxy. YouTube blocks
+    # datacenter IPs ("Sign in to confirm you're not a bot") regardless of player
+    # client; a residential IP clears the challenge without any cookies. When a proxy
+    # is configured we deliberately skip the cookie jar — stale/invalidated session
+    # cookies can themselves re-trigger bot-detection.
+    proxy = os.environ.get('YTDLP_PROXY')
+    if proxy:
+        ydl_opts['proxy'] = proxy
+        # Redact credentials in logs.
+        print(f"Routing yt-dlp through residential proxy {proxy.split('@')[-1]}")
+
+    # Legacy cookie fallback (used only when no proxy is set — e.g. local/residential
+    # runs). Mounted as a read-only secret, so copy it to a writable path first
+    # (yt-dlp rewrites the cookie jar on exit).
     cookies_src = os.environ.get('YOUTUBE_COOKIES_FILE', '/var/secrets/youtube/cookies.txt')
-    if os.path.exists(cookies_src):
+    if not proxy and os.path.exists(cookies_src):
         cookies_rw = os.path.join(download_path, 'yt-cookies.txt')
         try:
             shutil.copyfile(cookies_src, cookies_rw)
@@ -53,9 +64,9 @@ def download_audio(url, download_path="./"):
             '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         )
         print(f"Using YouTube cookies from {cookies_src}")
-    else:
-        print(f"WARNING: YouTube cookies file not found at {cookies_src}; "
-              f"downloads may fail with bot-detection")
+    elif not proxy:
+        print(f"WARNING: no YTDLP_PROXY set and no cookies at {cookies_src}; "
+              f"downloads will likely fail with bot-detection from datacenter IPs")
 
     try:
         # Download the video
