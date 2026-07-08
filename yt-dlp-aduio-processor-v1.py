@@ -24,6 +24,11 @@ def download_audio(url, download_path="./"):
         # YouTube nsig "n challenge" can be solved; without it format extraction fails
         # with "Requested format is not available".
         'remote_components': ['ejs:github'],
+        # The default `web` player client now fails YouTube's player challenge
+        # ("The page needs to be reloaded"), independent of IP or cookies. The
+        # `android` client extracts formats and captions reliably; list order is
+        # the fallback order (yt-dlp tries each until one succeeds).
+        'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'tv']}},
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
