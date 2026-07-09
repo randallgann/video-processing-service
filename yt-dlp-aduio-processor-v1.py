@@ -29,6 +29,12 @@ def download_audio(url, download_path="./"):
         # `android` client extracts formats and captions reliably; list order is
         # the fallback order (yt-dlp tries each until one succeeds).
         'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'tv']}},
+        # Residential proxies are slower/flakier than a direct datacenter link, so
+        # the default 20s read timeout trips mid-download of the googlevideo CDN
+        # stream. Give it room and retry transient proxy drops.
+        'socket_timeout': 60,
+        'retries': 10,
+        'fragment_retries': 10,
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
