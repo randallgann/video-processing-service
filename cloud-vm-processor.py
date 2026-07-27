@@ -14,8 +14,10 @@ This script runs on a cloud VM to:
 import os
 import sys
 import json
+import re
 import time
 import uuid
+import random
 import tempfile
 import datetime
 import subprocess
@@ -407,6 +409,34 @@ def upload_chunks(chunks, bucket_name, message_id):
     
     return chunks
 
+# Replicate throttles prediction creation aggressively — as low as 6 requests/minute
+# when the account's credit balance falls below $5. That is a transient condition and
+# deserves a far more patient retry budget than a genuine API error.
+THROTTLE_MARKERS = ("429", "throttled", "rate limit")
+
+
+def is_throttle_error(message):
+    """True when a Replicate exception is rate limiting rather than a real failure."""
+    lowered = message.lower()
+    return any(marker in lowered for marker in THROTTLE_MARKERS)
+
+
+def throttle_backoff_seconds(message, attempt):
+    """
+    Seconds to wait before retrying a throttled request.
+
+    Prefers the server's own hint ("Your rate limit resets in ~5s") and otherwise backs
+    off exponentially. The jitter matters: without it the concurrent transcription
+    workers retry in lockstep and keep colliding on the same 1-per-10s slot.
+    """
+    match = re.search(r"resets? in ~?(\d+(?:\.\d+)?)\s*s", message, re.IGNORECASE)
+    if match:
+        base = float(match.group(1)) + 1.0
+    else:
+        base = min(60.0, 5.0 * (2 ** (attempt - 1)))
+    return base + random.uniform(0, 0.5 * base)
+
+
 def transcribe_chunk_replicate(chunk_info, model_type=None, model_version=None):
     """
     Transcribe a single audio chunk using Replicate API
@@ -433,12 +463,20 @@ def transcribe_chunk_replicate(chunk_info, model_type=None, model_version=None):
     logger.info(f"Transcribing chunk {chunk_info['id']} with model {model_id}:{version_id}")
     logger.info(f"URL: {gcs_url}")
     
-    # Maximum retries for API calls
-    max_retries = 3
+    # Maximum retries for genuine API errors
+    max_retries = int(os.environ.get("TRANSCRIBE_MAX_RETRIES", "3"))
     retry_delay = 5  # seconds
-    
+
+    # Throttling gets its own, much larger budget. The old policy (3 attempts, 5s then
+    # 10s) gave up after ~15s — nowhere near long enough to outlast a 6-per-minute cap,
+    # so whole batches were silently reduced to empty transcripts.
+    max_throttle_retries = int(os.environ.get("TRANSCRIBE_MAX_THROTTLE_RETRIES", "12"))
+
+    attempt = 0
+    throttle_attempts = 0
+
     # Try to call Replicate API with retries
-    for attempt in range(max_retries):
+    while True:
         try:
             output = replicate.run(
                 f"{model_id}:{version_id}",
@@ -650,8 +688,23 @@ def transcribe_chunk_replicate(chunk_info, model_type=None, model_version=None):
             return result
             
         except Exception as e:
-            logger.error(f"Error transcribing chunk {chunk_info['id']} (attempt {attempt+1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
+            message = str(e)
+
+            # Rate limiting is transient — wait it out WITHOUT consuming the error budget.
+            if is_throttle_error(message) and throttle_attempts < max_throttle_retries:
+                throttle_attempts += 1
+                wait_seconds = throttle_backoff_seconds(message, throttle_attempts)
+                logger.warning(
+                    f"Chunk {chunk_info['id']} throttled by Replicate "
+                    f"(throttle retry {throttle_attempts}/{max_throttle_retries}); "
+                    f"waiting {wait_seconds:.1f}s"
+                )
+                time.sleep(wait_seconds)
+                continue
+
+            attempt += 1
+            logger.error(f"Error transcribing chunk {chunk_info['id']} (attempt {attempt}/{max_retries}): {e}")
+            if attempt < max_retries:
                 logger.info(f"Retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
                 retry_delay *= 2  # Exponential backoff
