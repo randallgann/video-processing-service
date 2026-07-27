@@ -1371,11 +1371,16 @@ def process_message(message):
         logger.info(f"Transcription results count: {len(transcription_results)}")
         
         final_transcript = combine_transcription_results(transcription_results, video_info)
-        
+
         # Log results of the combination
         logger.info(f"Final transcript entries count: {len(final_transcript)}")
         if not final_transcript:
             logger.error("CRITICAL: Final transcript is empty!")
+            chunk_errors = [
+                r.get("error", "unknown error") for r in transcription_results if r.get("failed")
+            ]
+            error_detail = "; ".join(chunk_errors) if chunk_errors else "no transcribable segments produced"
+            raise RuntimeError(f"Transcription produced no segments: {error_detail}")
         else:
             logger.info(f"First transcript entry sample: {final_transcript[0]}")
         
