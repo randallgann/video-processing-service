@@ -1,6 +1,37 @@
 import yt_dlp
 import os
+import time
 import shutil
+
+BOT_CHECK_MARKER = "confirm you\u2019re not a bot"
+
+
+def extract_with_bot_check_retry(ydl_opts, url, proxied):
+    """
+    Download with yt-dlp, retrying when YouTube answers with its bot check.
+
+    Returns (info, prepared_filename).
+
+    The proxy endpoint rotates its exit IP per connection and YouTube flags some of
+    those IPs ("Sign in to confirm you're not a bot") while others pass. Each attempt
+    builds a NEW YoutubeDL so it opens a new connection and lands on a new exit IP;
+    retrying inside one instance reuses the pooled connection and fails every time
+    (measured in the pod 2026-10-04: 0/8 reusing one instance, ~1/4 per fresh one).
+    Without a proxy the IP never changes, so retrying is pointless and we fail fast.
+    """
+    attempts = int(os.environ.get('YTDLP_BOT_CHECK_ATTEMPTS', '10')) if proxied else 1
+    for attempt in range(1, attempts + 1):
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                return info, ydl.prepare_filename(info)
+        except yt_dlp.utils.DownloadError as e:
+            message = str(e).replace("'", "\u2019")
+            if BOT_CHECK_MARKER not in message or attempt == attempts:
+                raise
+            print(f"YouTube bot check on attempt {attempt}/{attempts}; retrying with a new proxy exit IP")
+            time.sleep(min(2 * attempt, 10))
+
 
 def download_audio(url, download_path="./"):
     """
@@ -76,34 +107,32 @@ def download_audio(url, download_path="./"):
 
     try:
         # Download the video
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            print("Extracting video information...")
-            info = ydl.extract_info(url, download=True)
-            title = info['title']
-            # Get the base filename and ensure it's in the correct output directory
-            base_filename = ydl.prepare_filename(info)
-            # Make sure we're using the full path
-            if not os.path.isabs(base_filename):
-                base_filename = os.path.join(download_path, os.path.basename(base_filename))
-            base_filename_no_ext, _ = os.path.splitext(base_filename)
-            audio_path = base_filename_no_ext + ".mp3"
-            print(f"Expected audio path: {audio_path}")
-            
-            # Verify file exists
-            if os.path.exists(audio_path):
-                print(f"Audio file exists at: {audio_path}")
-            else:
-                print(f"Audio file not found at: {audio_path}")
-                # Try to find the file in the download directory
-                for file in os.listdir(download_path):
-                    if file.endswith('.mp3'):
-                        audio_path = os.path.join(download_path, file)
-                        print(f"Found audio file at: {audio_path}")
-                        break
-            description = info.get('description', '')
-            upload_date = info.get('upload_date')
-            print(f"Download completed: {audio_path}")
-            return audio_path, title, info['title'], description, upload_date
+        print("Extracting video information...")
+        info, base_filename = extract_with_bot_check_retry(ydl_opts, url, proxied=bool(proxy))
+        title = info['title']
+        # Get the base filename and ensure it's in the correct output directory
+        # Make sure we're using the full path
+        if not os.path.isabs(base_filename):
+            base_filename = os.path.join(download_path, os.path.basename(base_filename))
+        base_filename_no_ext, _ = os.path.splitext(base_filename)
+        audio_path = base_filename_no_ext + ".mp3"
+        print(f"Expected audio path: {audio_path}")
+        
+        # Verify file exists
+        if os.path.exists(audio_path):
+            print(f"Audio file exists at: {audio_path}")
+        else:
+            print(f"Audio file not found at: {audio_path}")
+            # Try to find the file in the download directory
+            for file in os.listdir(download_path):
+                if file.endswith('.mp3'):
+                    audio_path = os.path.join(download_path, file)
+                    print(f"Found audio file at: {audio_path}")
+                    break
+        description = info.get('description', '')
+        upload_date = info.get('upload_date')
+        print(f"Download completed: {audio_path}")
+        return audio_path, title, info['title'], description, upload_date
     except Exception as e:
         print(f"Download error: {str(e)}")
         raise

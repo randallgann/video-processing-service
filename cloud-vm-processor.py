@@ -166,6 +166,21 @@ def get_model_info(model_type=None, model_version=None):
     
     return model_id, model_version, is_fast_model
 
+def summarize_download_error(stderr):
+    """
+    Pick the meaningful line from the downloader's stderr for the user-facing error.
+
+    stderr starts with unrelated warnings (e.g. yt-dlp's Python 3.10 deprecation
+    notice), so reporting it verbatim showed users "Deprecated Feature: ..." instead
+    of the real cause.
+    """
+    lines = [line.strip() for line in (stderr or '').splitlines() if line.strip()]
+    errors = [line for line in lines if line.startswith('ERROR:')]
+    if errors:
+        return errors[-1]
+    return lines[-1] if lines else 'unknown download error'
+
+
 def download_video(video_url, output_dir):
     """
     Download video using yt-dlp and return the audio path
@@ -194,7 +209,7 @@ def download_video(video_url, output_dir):
         
         if result.returncode != 0:
             logger.error(f"Error downloading video: {result.stderr}")
-            raise Exception(f"Failed to download video: {result.stderr}")
+            raise Exception(f"Failed to download video: {summarize_download_error(result.stderr)}")
         
         # Find the downloaded audio file
         audio_files = [f for f in os.listdir(output_dir) if f.endswith('.mp3')]
