@@ -1038,7 +1038,8 @@ def publish_progress(message_id, video_url, status, progress_percent,
     except Exception as e:
         logger.error(f"Error publishing progress update: {e}")
 
-def publish_completion_result(message_id, video_url, status, transcript_location=None, error=None, db_video_id=None):
+def publish_completion_result(message_id, video_url, status, transcript_location=None, error=None, db_video_id=None,
+                              correlation=None):
     """
     Publish completion result to the results topic for memory import processing
 
@@ -1049,6 +1050,7 @@ def publish_completion_result(message_id, video_url, status, transcript_location
         transcript_location: GCS path to transcript JSON file (for successful completions)
         error: Error message (for failed completions)
         db_video_id: DB UUID from request payload (echoed as video_id when present)
+        correlation: Publisher's routing context, echoed back unchanged when present
     """
     if not RESULTS_TOPIC_ID:
         logger.info("Results publishing disabled (RESULTS_TOPIC_ID not set)")
@@ -1079,6 +1081,9 @@ def publish_completion_result(message_id, video_url, status, transcript_location
         # Add error for failed completions
         if status == "failed" and error:
             completion_message["error"] = error
+
+        if correlation:
+            completion_message["correlation"] = correlation
         
         # Publish message
         message_json = json.dumps(completion_message)
@@ -1170,6 +1175,8 @@ def process_message(message):
     start_time = time.time()
     message_id = None
     video_url = None
+    db_video_id = None
+    correlation = None
     
     try:
         message_id = message.message_id
@@ -1188,6 +1195,13 @@ def process_message(message):
         # Extract DB UUID from request payload (Option A, D-07/D-08)
         # Falls back to None for legacy/manual/demo requests that lack the nested 'video' object
         db_video_id = data['video'].get('id') if isinstance(data.get('video'), dict) else None
+
+        # Opaque routing context from the publisher ({video_id, job_id, cache_id,
+        # content_source_id}). Echoed back unchanged on the completion so the API service
+        # routes by exact ids instead of looking the YouTube ID up across tenants.
+        correlation = data.get('correlation') if isinstance(data.get('correlation'), dict) else None
+        if not db_video_id and correlation:
+            db_video_id = correlation.get('video_id')
 
         if not video_url:
             logger.error("Message missing video_url or video.url")
@@ -1505,7 +1519,8 @@ def process_message(message):
             video_url=video_url,
             status="completed",
             transcript_location=transcript_gcs_path,
-            db_video_id=db_video_id
+            db_video_id=db_video_id,
+            correlation=correlation
         )
         
         # Acknowledge the message
@@ -1536,7 +1551,8 @@ def process_message(message):
                 video_url=video_url,
                 status="failed",
                 error=str(e),
-                db_video_id=db_video_id
+                db_video_id=db_video_id,
+                correlation=correlation
             )
             
             # Don't retry if we made significant progress
