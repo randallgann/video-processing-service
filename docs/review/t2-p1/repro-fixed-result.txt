@@ -1,0 +1,5 @@
+MISSING DURATION 0 {'message_id': 'msg-1', 'video_url': 'https://www.youtube.com/watch?v=abc123def45', 'status': 'failed', 'error': 'Video is 15000s, over the 14400s limit', 'db_video_id': 'db-video-uuid', 'correlation': {'video_id': 'db-video-uuid', 'job_id': 'job-1'}} 1
+.ROLLING OUTPUT a b c d e f g
+.CAPTION DURATION failed 0
+.
+3 passed in 0.01s
