@@ -1,0 +1,24 @@
+import pytest
+from test_processor import worker, request
+
+@pytest.mark.parametrize('error,ack', [
+    ('Sign in to confirm your age', 1),
+    ('Private video', 1),
+    ('This video has been removed by the uploader', 1),
+    ('Join this channel to get access to members-only content', 1),
+    ('The uploader has not made this video available in your country', 1),
+    ('Video unavailable. This content isn’t available.', 0),
+    ('Video unavailable. Try again later.', 0),
+    ('HTTP Error 429: Too Many Requests', 0),
+])
+def test_review_download_failure_disposition(worker, error, ack):
+    run, calls, state = worker
+    state['info'] = None
+    state['captions'] = None
+    state['download_error'] = error
+    message = run(request())
+    assert message.acks == ack
+    assert calls['transcribe'] == 0
+    assert len(calls['completions']) == 1
+    assert calls['completions'][0]['status'] == 'failed'
+    assert error in calls['completions'][0]['error']
