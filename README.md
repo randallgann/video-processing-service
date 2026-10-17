@@ -104,7 +104,9 @@ To process a video, publish a message to the configured PubSub topic with this f
 {
   "video_url": "https://www.youtube.com/watch?v=YOUR_VIDEO_ID",
   "model_type": "openai",  // Optional, "openai" or "fast"
-  "use_wav": true          // Optional, default from env
+  "use_wav": true,         // Optional, default from env
+  "quality": "standard",   // Optional: "standard" (captions first, Whisper fallback) or "whisper"
+  "language": "en"         // Optional caption language, default "en"
 }
 ```
 
@@ -148,6 +150,19 @@ The service produces a JSON file with this format:
   // Additional segments...
 ]
 ```
+
+## Tests
+
+Offline unit tests (no YouTube, Replicate, GCS or Pub/Sub calls). The image runs Python
+3.10; any local interpreter >= 3.10 works:
+
+```bash
+python3 -m venv .venv          # or: uv venv --python 3.10 .venv
+.venv/bin/pip install -r requirements-optimized.txt -r requirements-dev.txt
+.venv/bin/python -m pytest -q
+```
+
+The tests never load `.env`: `tests/conftest.py` replaces `dotenv` with a no-op.
 
 ## Troubleshooting
 

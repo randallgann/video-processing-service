@@ -18,6 +18,7 @@ import re
 import time
 import uuid
 import random
+import signal
 import tempfile
 import datetime
 import subprocess
@@ -32,6 +33,9 @@ from google.cloud import pubsub_v1
 from google.cloud import storage
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import socketserver
+
+from captions import fetch_captions, format_upload_date, window_segments
+from ytdlp_opts import build_ydl_opts, extract_with_bot_check_retry
 
 # Load environment variables
 load_dotenv()
@@ -63,6 +67,10 @@ DEFAULT_MODEL_TYPE = os.environ.get('DEFAULT_MODEL_TYPE', 'openai')  # 'openai' 
 USE_WAV_FORMAT = os.environ.get('USE_WAV_FORMAT', '').lower() in ('true', '1', 'yes')
 HTTP_PORT = int(os.environ.get('PORT', '8080'))
 METRICS_PORT = int(os.environ.get('METRICS_PORT', '9090'))
+# Backstop for requests that skipped rag-widget's quote-time cap (INGEST_MAX_VIDEO_SECONDS).
+MAX_VIDEO_DURATION_SECONDS = int(os.environ.get('MAX_VIDEO_DURATION_SECONDS', '14400'))
+# Request `quality`: standard = captions first, Whisper fallback; whisper = Whisper only.
+QUALITIES = ('standard', 'whisper')
 
 # Global service status
 service_ready = False
@@ -436,6 +444,19 @@ def is_throttle_error(message):
     return any(marker in lowered for marker in THROTTLE_MARKERS)
 
 
+# Throttled Replicate responses since start. Throttling is the visible symptom of a low
+# credit balance; there is no /metrics endpoint, so the running total goes in the log line.
+replicate_throttled_total = 0
+_throttle_lock = threading.Lock()
+
+
+def record_replicate_throttle():
+    global replicate_throttled_total
+    with _throttle_lock:
+        replicate_throttled_total += 1
+        return replicate_throttled_total
+
+
 def throttle_backoff_seconds(message, attempt):
     """
     Seconds to wait before retrying a throttled request.
@@ -705,14 +726,19 @@ def transcribe_chunk_replicate(chunk_info, model_type=None, model_version=None):
         except Exception as e:
             message = str(e)
 
+            throttled = is_throttle_error(message)
+            if throttled:
+                throttled_total = record_replicate_throttle()
+
             # Rate limiting is transient — wait it out WITHOUT consuming the error budget.
-            if is_throttle_error(message) and throttle_attempts < max_throttle_retries:
+            if throttled and throttle_attempts < max_throttle_retries:
                 throttle_attempts += 1
                 wait_seconds = throttle_backoff_seconds(message, throttle_attempts)
                 logger.warning(
                     f"Chunk {chunk_info['id']} throttled by Replicate "
                     f"(throttle retry {throttle_attempts}/{max_throttle_retries}); "
-                    f"waiting {wait_seconds:.1f}s"
+                    f"waiting {wait_seconds:.1f}s; replicate_throttled_total={throttled_total} "
+                    f"(Replicate throttles accounts below $5 credit; check the balance)"
                 )
                 time.sleep(wait_seconds)
                 continue
@@ -907,60 +933,7 @@ def combine_transcription_results(results, video_info):
         for i, result in enumerate(results):
             logger.error(f"Full Result {i}: {result}")
     
-    # Sort segments by start time
-    all_segments.sort(key=lambda x: x["start"])
-    
-    # Create 1-minute chunks for better context
-    segments_for_vector = []
-    current_chunk = []
-    current_start = None
-    current_end = None
-    chunk_duration = 60.0  # 1 minute chunks
-    
-    for seg in all_segments:
-        if not current_chunk:
-            current_start = seg["start"]
-        current_chunk.append(seg["text"].strip())
-        current_end = seg["end"]
-        
-        if (current_end - current_start) >= chunk_duration:
-            chunk_text = " ".join(current_chunk)
-            segments_for_vector.append({
-                "start_time": current_start,
-                "end_time": current_end,
-                "text": chunk_text
-            })
-            current_chunk = []
-            current_start = None
-    
-    # Add leftover chunk
-    if current_chunk:
-        chunk_text = " ".join(current_chunk)
-        segments_for_vector.append({
-            "start_time": current_start,
-            "end_time": current_end,
-            "text": chunk_text
-        })
-    
-    logger.info(f"Created {len(segments_for_vector)} vector-ready segments")
-    
-    # Prepare final output
-    final_output = []
-    
-    for segment in segments_for_vector:
-        final_output.append({
-            "text": f"Spoken Words: {segment['text']}",
-            "metadata": {
-                "title": video_info.get("title", ""),
-                "video_url": video_info.get("url", ""),
-                "video_id": video_info.get("id", ""),
-                "timestamp_start": segment["start_time"],
-                "timestamp_end": segment["end_time"],
-                "upload_date": video_info.get("upload_date", "")
-            }
-        })
-    
-    return final_output
+    return window_segments(all_segments, video_info)
 
 def extract_video_id(video_url):
     """
@@ -1054,7 +1027,8 @@ def publish_progress(message_id, video_url, status, progress_percent,
         logger.error(f"Error publishing progress update: {e}")
 
 def publish_completion_result(message_id, video_url, status, transcript_location=None, error=None, db_video_id=None,
-                              correlation=None):
+                              correlation=None, transcript_source=None, language=None, duration_seconds=None,
+                              title=None, channel_title=None):
     """
     Publish completion result to the results topic for memory import processing
 
@@ -1066,6 +1040,10 @@ def publish_completion_result(message_id, video_url, status, transcript_location
         error: Error message (for failed completions)
         db_video_id: DB UUID from request payload (echoed as video_id when present)
         correlation: Publisher's routing context, echoed back unchanged when present
+        transcript_source: 'captions' or 'whisper' (T2)
+        language: transcript language: caption track language, else the request's
+        duration_seconds, title, channel_title: video metadata from yt-dlp
+        The T2 fields are added only when not None, so legacy consumers see the old shape.
     """
     if not RESULTS_TOPIC_ID:
         logger.info("Results publishing disabled (RESULTS_TOPIC_ID not set)")
@@ -1099,6 +1077,12 @@ def publish_completion_result(message_id, video_url, status, transcript_location
 
         if correlation:
             completion_message["correlation"] = correlation
+
+        for key, value in (("transcript_source", transcript_source), ("language", language),
+                           ("duration_seconds", duration_seconds), ("title", title),
+                           ("channel_title", channel_title)):
+            if value is not None:
+                completion_message[key] = value
         
         # Publish message
         message_json = json.dumps(completion_message)
@@ -1179,6 +1163,63 @@ def upload_results(result_file_path, bucket_name, message_id):
         logger.error(f"Error uploading results: {e}")
         raise
 
+class NonRetryableError(RuntimeError):
+    """A failure redelivery cannot fix: the message is acked after the failed completion."""
+
+
+BOT_CHECK_MARKERS = ("not a bot",)
+
+
+def resolve_quality(value):
+    """Request `quality`; absent means standard, anything unknown is standard with a warning."""
+    if value is None:
+        return 'standard'
+    if value in QUALITIES:
+        return value
+    logger.warning(f"Unknown quality {value!r}; using 'standard'")
+    return 'standard'
+
+
+def resolve_language(value):
+    """Request `language`, defaulting to 'en'."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return 'en'
+
+
+def check_duration(duration_seconds):
+    """Refuse a video over MAX_VIDEO_DURATION_SECONDS before paying for it."""
+    if duration_seconds and duration_seconds > MAX_VIDEO_DURATION_SECONDS:
+        raise NonRetryableError(
+            f"Video is {int(round(duration_seconds))}s, over the {MAX_VIDEO_DURATION_SECONDS}s limit")
+
+
+def probe_video(video_url, work_dir):
+    """
+    yt-dlp metadata (duration, title, channel, upload date) without downloading anything.
+
+    Returns None when extraction fails; the job then goes straight to the audio download,
+    which has its own retries, and the duration cap is checked on the downloaded audio.
+    """
+    try:
+        opts = build_ydl_opts(work_dir, audio=False)
+        for key in ('writesubtitles', 'writeautomaticsub', 'subtitlesformat', 'subtitleslangs'):
+            opts.pop(key, None)
+        info, _ = extract_with_bot_check_retry(opts, video_url, proxied=bool(opts.get('proxy')), download=False)
+        return info
+    except Exception as e:
+        logger.warning(f"Pre-download probe failed for {video_url}: {e}")
+        return None
+
+
+def write_transcript(work_dir, video_info, final_transcript):
+    result_file_path = os.path.join(work_dir, f"transcript_{video_info['id'] or 'result'}.json")
+    with open(result_file_path, 'w', encoding='utf-8') as f:
+        json.dump(final_transcript, f, indent=2)
+    logger.info(f"Saved results to {result_file_path}")
+    return result_file_path
+
+
 def process_message(message):
     """
     Process a single Pub/Sub message
@@ -1230,7 +1271,13 @@ def process_message(message):
         
         # Extract custom parameters
         use_wav = data.get('use_wav', USE_WAV_FORMAT)
-        
+
+        # T2 request contract: quality picks captions-first vs Whisper; model_type still
+        # picks which Whisper.
+        quality = resolve_quality(data.get('quality'))
+        language = resolve_language(data.get('language'))
+        logger.info(f"Quality: {quality}, language: {language}")
+
         # Create a unique ID for this processing run
         run_id = str(uuid.uuid4())
         
@@ -1258,6 +1305,63 @@ def process_message(message):
             db_video_id=db_video_id
         )
 
+        # 0. Probe metadata and refuse over-long videos before downloading anything
+        info = probe_video(video_url, work_dir)
+        if info:
+            video_info["title"] = info.get("title") or ""
+            video_info["upload_date"] = format_upload_date(info.get("upload_date"))
+            check_duration(info.get("duration"))
+        probed_duration = info.get("duration") if info else None
+        channel_title = (info.get("channel") or info.get("uploader")) if info else None
+
+        # 0b. Captions first for standard quality: no download, no Replicate
+        if quality == 'standard' and info:
+            captions = fetch_captions(video_url, language, work_dir=work_dir)
+            if captions:
+                publish_progress(
+                    message_id=message_id,
+                    video_url=video_url,
+                    status="processing",
+                    progress_percent=50,
+                    current_stage="captions",
+                    stage_progress_percent=50,
+                    start_time=start_time,
+                    db_video_id=db_video_id
+                )
+                result_file_path = write_transcript(work_dir, video_info, captions["segments"])
+                result_url = upload_results(result_file_path, BUCKET_NAME, message_id)
+                publish_progress(
+                    message_id=message_id,
+                    video_url=video_url,
+                    status="processing",
+                    progress_percent=90,
+                    current_stage="captions",
+                    stage_progress_percent=100,
+                    start_time=start_time,
+                    db_video_id=db_video_id
+                )
+                duration = probed_duration or captions["duration_seconds"]
+                publish_completion_result(
+                    message_id=message_id,
+                    video_url=video_url,
+                    status="completed",
+                    transcript_location=f"gs://{BUCKET_NAME}/{message_id}/results/{os.path.basename(result_file_path)}",
+                    db_video_id=db_video_id,
+                    correlation=correlation,
+                    transcript_source="captions",
+                    language=captions["language"],
+                    duration_seconds=int(round(duration)) if duration else None,
+                    title=captions["title"] or video_info["title"] or None,
+                    channel_title=captions["channel_title"] or channel_title,
+                )
+                message.ack()
+                logger.info(f"Successfully processed message {message_id} from {captions['kind']} captions "
+                            f"({captions['language']}); results at {result_url}")
+                return
+            logger.info("No captions, falling back to Whisper")
+        elif quality == 'standard':
+            logger.info("Metadata probe failed; skipping captions and going straight to Whisper")
+
         # 1. Download video
         publish_progress(
             message_id=message_id,
@@ -1269,21 +1373,32 @@ def process_message(message):
             start_time=start_time,
             db_video_id=db_video_id
         )
-        
-        audio_path, desc_path = download_video(video_url, work_dir)
-        
-        # Extract video title from description file
+
         try:
-            with open(desc_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if line.lower().startswith('title:'):
-                        video_info["title"] = line.split(":", 1)[1].strip()
-                        break
-                    if line.lower().startswith('upload date:'):
-                        video_info["upload_date"] = line.split(":", 1)[1].strip()
+            audio_path, desc_path = download_video(video_url, work_dir)
         except Exception as e:
-            logger.warning(f"Error reading description file: {e}")
-        
+            # The downloader already walked the proxy pool; a redelivery would hit the same wall.
+            if any(marker in str(e).lower() for marker in BOT_CHECK_MARKERS):
+                raise NonRetryableError(str(e)) from e
+            raise
+
+        # Without the probe, take title/date from the downloader's description file and
+        # enforce the duration cap on the downloaded audio (still before any Replicate spend)
+        audio_duration = None
+        if not info:
+            try:
+                with open(desc_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if line.lower().startswith('title:'):
+                            video_info["title"] = line.split(":", 1)[1].strip()
+                            break
+                        if line.lower().startswith('upload date:'):
+                            video_info["upload_date"] = line.split(":", 1)[1].strip()
+            except Exception as e:
+                logger.warning(f"Error reading description file: {e}")
+            audio_duration = get_audio_duration(audio_path)
+            check_duration(audio_duration)
+
         # Download complete progress update
         publish_progress(
             message_id=message_id,
@@ -1467,12 +1582,8 @@ def process_message(message):
             logger.info(f"First transcript entry sample: {final_transcript[0]}")
         
         # Save combined results
-        result_file_path = os.path.join(work_dir, f"transcript_{video_info['id'] or 'result'}.json")
-        with open(result_file_path, 'w', encoding='utf-8') as f:
-            json.dump(final_transcript, f, indent=2)
-        
-        logger.info(f"Saved results to {result_file_path}")
-        
+        result_file_path = write_transcript(work_dir, video_info, final_transcript)
+
         publish_progress(
             message_id=message_id,
             video_url=video_url,
@@ -1529,13 +1640,24 @@ def process_message(message):
         
         # Publish completion result for memory import processing
         transcript_gcs_path = f"gs://{BUCKET_NAME}/{message_id}/results/{os.path.basename(result_file_path)}"
+        if probed_duration:
+            duration_seconds = int(round(probed_duration))
+        else:
+            if audio_duration is None:
+                audio_duration = get_audio_duration(audio_path)
+            duration_seconds = int(audio_duration) if audio_duration else None
         publish_completion_result(
             message_id=message_id,
             video_url=video_url,
             status="completed",
             transcript_location=transcript_gcs_path,
             db_video_id=db_video_id,
-            correlation=correlation
+            correlation=correlation,
+            transcript_source="whisper",
+            language=language,
+            duration_seconds=duration_seconds,
+            title=video_info["title"] or None,
+            channel_title=channel_title,
         )
         
         # Acknowledge the message
@@ -1570,8 +1692,11 @@ def process_message(message):
                 correlation=correlation
             )
             
-            # Don't retry if we made significant progress
-            if 'transcription_results' in locals():
+            # Don't retry if we made significant progress, or if a retry cannot succeed
+            if isinstance(e, NonRetryableError):
+                logger.warning("Non-retryable failure, acknowledging message to avoid retry")
+                message.ack()
+            elif 'transcription_results' in locals():
                 logger.warning("Error occurred after significant processing, acknowledging message to avoid retry")
                 message.ack()
             else:
@@ -1669,6 +1794,29 @@ def check_environment():
     
     return True
 
+def make_sigterm_handler(streaming_pull_future):
+    """
+    SIGTERM (pod termination): stop pulling, let in-flight messages finish, then exit.
+
+    Readiness goes false at once. cancel() stops the stream and nacks messages that were
+    pulled but not started; because the subscription is opened with
+    await_callbacks_on_shutdown=True, the main thread's result() only returns once every
+    running process_message has finished and acked. A second SIGTERM is a no-op.
+    """
+    state = {"handled": False}
+
+    def handle_sigterm(signum=None, frame=None):
+        global service_ready
+        if state["handled"]:
+            return
+        state["handled"] = True
+        service_ready = False
+        logger.info("SIGTERM received: stopped pulling messages; waiting for in-flight messages to finish")
+        streaming_pull_future.cancel()
+
+    return handle_sigterm
+
+
 def main():
     """Main processing loop"""
     global service_ready, service_healthy
@@ -1700,8 +1848,10 @@ def main():
         
         # Subscribe to the subscription
         streaming_pull_future = subscriber.subscribe(
-            subscription_path, callback=callback, flow_control=flow_control
+            subscription_path, callback=callback, flow_control=flow_control,
+            await_callbacks_on_shutdown=True
         )
+        signal.signal(signal.SIGTERM, make_sigterm_handler(streaming_pull_future))
         
         # Mark service as ready once Pub/Sub subscription is active
         service_ready = True
@@ -1713,7 +1863,8 @@ def main():
         sys.exit(1)
     
     try:
-        # Keep the main thread from exiting
+        # Keep the main thread from exiting. Returns only after a cancel (SIGTERM) once
+        # in-flight callbacks have drained; the pod's terminationGracePeriodSeconds bounds it.
         streaming_pull_future.result()
     except KeyboardInterrupt:
         service_ready = False
@@ -1726,6 +1877,10 @@ def main():
         service_healthy = False
         streaming_pull_future.cancel()
         raise
+
+    service_healthy = False
+    logger.info("Subscription drained after shutdown; exiting")
+    sys.exit(0)
 
 if __name__ == "__main__":
     # Parse command line arguments for local testing

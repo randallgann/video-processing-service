@@ -17,3 +17,6 @@ setup-env-vars.sh
 LOCAL-TESTING.md
 key.json
 .env
+.venv
+.pytest_cache
+__pycache__/

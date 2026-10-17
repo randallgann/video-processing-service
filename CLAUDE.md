@@ -16,6 +16,11 @@ This service handles YouTube video transcription as part of the larger RAG Widge
    - Extracts audio in MP3 format
    - Saves video metadata
 
+   **ytdlp_opts.py** - yt-dlp options, proxy pinning and the bot-check retry, shared by
+   the downloader and the captions path. **captions.py** - captions-first transcripts
+   (json3 track -> the same transcript JSON as Whisper). Both must be in the Dockerfile
+   COPY list.
+
 3. **transcribe-whisper-replicate.py** - Transcription handler
    - Sends audio chunks to Replicate API
    - Processes Whisper model responses
@@ -219,7 +224,22 @@ DEFAULT_MODEL_TYPE=openai         # or "fast"
 USE_WAV_FORMAT=true              # Convert chunks to WAV
 TMPDIR=/tmp/transcription        # Writable temp directory
 LOG_LEVEL=INFO                   # Logging verbosity
+MAX_VIDEO_DURATION_SECONDS=14400  # Over this, fail (and ack) before downloading
 ```
+
+### Request / completion contract (T2)
+- Request `quality`: `standard` (default when absent) tries the YouTube caption track
+  first and falls back to Whisper; `whisper` always uses Whisper. `model_type` still
+  picks which Whisper. Request `language` (default `en`) picks the caption track.
+- Completion adds, only when known: `transcript_source` (`captions`|`whisper`),
+  `language` (caption track language, else the request's), `duration_seconds`, `title`,
+  `channel_title`. Legacy consumers see the old fields unchanged.
+- Videos over `MAX_VIDEO_DURATION_SECONDS` and bot-check download failures publish
+  `failed` and are acked (redelivery cannot fix them).
+- SIGTERM: readiness goes false, the streaming pull is cancelled, in-flight messages
+  finish and ack, then the process exits 0.
+- Replicate throttling logs a WARNING with a running `replicate_throttled_total`
+  (there is no /metrics endpoint).
 
 ### Whisper Models
 - **OpenAI Whisper**: `openai/whisper:8099696689d249cf8b122d833c36ac3f75505c666a395ca40ef26f68e7d3d16e`

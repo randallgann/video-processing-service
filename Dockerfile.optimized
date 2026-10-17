@@ -26,6 +26,8 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY cloud-vm-processor.py /app/
 COPY yt-dlp-aduio-processor-v1.py /app/
+COPY ytdlp_opts.py /app/
+COPY captions.py /app/
 COPY transcribe-whisper-replicate.py /app/
 COPY debug-replicate.py /app/
 COPY monitor-progress.py /app/
