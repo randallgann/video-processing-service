@@ -1,0 +1,37 @@
+import captions
+from test_processor import worker, request
+
+
+def test_cap_when_probe_succeeds_but_duration_is_missing(worker, processor, monkeypatch):
+    run, calls, state = worker
+    state['info'] = {'id': 'abc123def45', 'title': 'No duration', 'channel': 'Channel'}
+    state['audio_seconds'] = 15000
+    monkeypatch.setattr(processor, 'MAX_VIDEO_DURATION_SECONDS', 14400)
+    message = run(request(quality='whisper'))
+    print('MISSING DURATION', calls['transcribe'], calls['completions'][0], message.acks)
+    assert calls['transcribe'] == 0
+    assert calls['completions'][0]['status'] == 'failed'
+    assert message.acks == 1
+
+
+def test_three_rolling_cues_do_not_repeat_the_trimmed_window():
+    cues = [
+        {'start': 0, 'end': 3, 'text': 'a b c d'},
+        {'start': 3, 'end': 6, 'text': 'c d e f'},
+        {'start': 6, 'end': 9, 'text': 'c d e f g'},
+    ]
+    actual = ' '.join(c['text'] for c in captions.dedupe_rolling(cues))
+    print('ROLLING OUTPUT', actual)
+    assert actual == 'a b c d e f g'
+
+
+def test_cap_uses_caption_metadata_when_probe_omits_duration(worker, processor, monkeypatch):
+    run, calls, state = worker
+    state['info'] = {'id': 'abc123def45', 'title': 'No duration', 'channel': 'Channel'}
+    state['captions']['duration_seconds'] = 15000
+    monkeypatch.setattr(processor, 'MAX_VIDEO_DURATION_SECONDS', 14400)
+    message = run(request(quality='standard'))
+    print('CAPTION DURATION', calls['completions'][0]['status'], len(calls['uploads']))
+    assert calls['completions'][0]['status'] == 'failed'
+    assert calls['uploads'] == []
+    assert message.acks == 1

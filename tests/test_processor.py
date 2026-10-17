@@ -163,6 +163,54 @@ def test_over_duration_cap_fails_and_acks(worker, processor, monkeypatch):
     assert 'transcript_source' not in completion
 
 
+@pytest.mark.parametrize('quality', ['whisper', 'standard'])
+def test_probe_without_duration_caps_on_audio_before_spend(worker, processor, monkeypatch, quality):
+    """Review finding 1: a probe that knows the video but not its duration must not bypass the cap."""
+    run, calls, state = worker
+    state['info'] = dict(INFO, duration=None)
+    state['captions'] = None
+    state['audio_seconds'] = 15000.0
+    message = run(request(quality=quality))
+    assert calls['download'] == 1
+    assert calls['transcribe'] == 0, 'no Replicate spend for an over-cap video'
+    assert calls['uploads'] == []
+    assert message.acks == 1
+    [completion] = calls['completions']
+    assert completion['status'] == 'failed'
+    assert completion['error'] == 'Video is 15000s, over the 14400s limit'
+
+
+def test_probe_without_duration_caps_caption_duration(worker):
+    run, calls, state = worker
+    state['info'] = dict(INFO, duration=None)
+    state['captions'] = dict(CAPTIONS, duration_seconds=15000)
+    message = run(request(quality='standard'))
+    assert calls['uploads'] == [] and calls['download'] == 0
+    assert message.acks == 1
+    [completion] = calls['completions']
+    assert completion['status'] == 'failed'
+    assert completion['error'] == 'Video is 15000s, over the 14400s limit'
+
+
+def test_probe_without_duration_under_cap_keeps_metadata(worker):
+    run, calls, state = worker
+    state['info'] = dict(INFO, duration=None)
+    state['captions'] = None
+    state['audio_seconds'] = 700.9
+    run(request(quality='standard'))
+    completion = calls['completions'][0]
+    assert completion['status'] == 'completed'
+    assert completion['duration_seconds'] == 700
+    assert (completion['title'], completion['channel_title']) == ('Real Title', 'The Channel')
+    assert calls['uploads'][0][0]['metadata']['upload_date'] == '10-17-2026'
+
+    calls['completions'].clear()
+    state['captions'] = dict(CAPTIONS, duration_seconds=755)
+    run(request(quality='standard'))
+    assert calls['completions'][0]['transcript_source'] == 'captions'
+    assert calls['completions'][0]['duration_seconds'] == 755
+
+
 def test_default_cap_is_four_hours(processor):
     assert processor.MAX_VIDEO_DURATION_SECONDS == 14400
 

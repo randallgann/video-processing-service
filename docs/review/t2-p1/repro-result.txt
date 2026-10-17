@@ -1,0 +1,65 @@
+MISSING DURATION 1 {'message_id': 'msg-1', 'video_url': 'https://www.youtube.com/watch?v=abc123def45', 'status': 'completed', 'transcript_location': 'gs://None/msg-1/results/transcript_abc123def45.json', 'db_video_id': 'db-video-uuid', 'correlation': {'video_id': 'db-video-uuid', 'job_id': 'job-1'}, 'transcript_source': 'whisper', 'language': 'en', 'duration_seconds': 15000, 'title': 'No duration', 'channel_title': 'Channel'} 1
+FROLLING OUTPUT a b c d e f c d e f g
+FCAPTION DURATION completed 1
+F
+=================================== FAILURES ===================================
+_____________ test_cap_when_probe_succeeds_but_duration_is_missing _____________
+
+worker = (<function worker.<locals>.run at 0x10ff9a680>, {'completions': [{'message_id': 'msg-1', 'video_url': 'https://www.you...{}}], 'language': 'en', 'kind': 'auto', 'duration_seconds': 755, ...}, 'download_error': None, 'audio_seconds': 15000})
+processor = <module 'cloud_vm_processor' from '/Users/rgann/source/llmexpert-platform/youtube-video-transcriptor/cloud-vm-processor.py'>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10ff3df60>
+
+    def test_cap_when_probe_succeeds_but_duration_is_missing(worker, processor, monkeypatch):
+        run, calls, state = worker
+        state['info'] = {'id': 'abc123def45', 'title': 'No duration', 'channel': 'Channel'}
+        state['audio_seconds'] = 15000
+        monkeypatch.setattr(processor, 'MAX_VIDEO_DURATION_SECONDS', 14400)
+        message = run(request(quality='whisper'))
+        print('MISSING DURATION', calls['transcribe'], calls['completions'][0], message.acks)
+>       assert calls['transcribe'] == 0
+E       assert 1 == 0
+
+tests/test_review_regressions.py:12: AssertionError
+___________ test_three_rolling_cues_do_not_repeat_the_trimmed_window ___________
+
+    def test_three_rolling_cues_do_not_repeat_the_trimmed_window():
+        cues = [
+            {'start': 0, 'end': 3, 'text': 'a b c d'},
+            {'start': 3, 'end': 6, 'text': 'c d e f'},
+            {'start': 6, 'end': 9, 'text': 'c d e f g'},
+        ]
+        actual = ' '.join(c['text'] for c in captions.dedupe_rolling(cues))
+        print('ROLLING OUTPUT', actual)
+>       assert actual == 'a b c d e f g'
+E       AssertionError: assert 'a b c d e f c d e f g' == 'a b c d e f g'
+E         
+E         - a b c d e f g
+E         + a b c d e f c d e f g
+E         ?             ++++++++
+
+tests/test_review_regressions.py:25: AssertionError
+___________ test_cap_uses_caption_metadata_when_probe_omits_duration ___________
+
+worker = (<function worker.<locals>.run at 0x10ffb7ac0>, {'completions': [{'message_id': 'msg-1', 'video_url': 'https://www.you...}], 'language': 'en', 'kind': 'auto', 'duration_seconds': 15000, ...}, 'download_error': None, 'audio_seconds': 754.2})
+processor = <module 'cloud_vm_processor' from '/Users/rgann/source/llmexpert-platform/youtube-video-transcriptor/cloud-vm-processor.py'>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10ff26860>
+
+    def test_cap_uses_caption_metadata_when_probe_omits_duration(worker, processor, monkeypatch):
+        run, calls, state = worker
+        state['info'] = {'id': 'abc123def45', 'title': 'No duration', 'channel': 'Channel'}
+        state['captions']['duration_seconds'] = 15000
+        monkeypatch.setattr(processor, 'MAX_VIDEO_DURATION_SECONDS', 14400)
+        message = run(request(quality='standard'))
+        print('CAPTION DURATION', calls['completions'][0]['status'], len(calls['uploads']))
+>       assert calls['completions'][0]['status'] == 'failed'
+E       AssertionError: assert 'completed' == 'failed'
+E         
+E         - failed
+E         + completed
+
+tests/test_review_regressions.py:35: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_review_regressions.py::test_cap_when_probe_succeeds_but_duration_is_missing
+FAILED tests/test_review_regressions.py::test_three_rolling_cues_do_not_repeat_the_trimmed_window
+FAILED tests/test_review_regressions.py::test_cap_uses_caption_metadata_when_probe_omits_duration
+3 failed in 0.04s

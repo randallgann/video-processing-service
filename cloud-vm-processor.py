@@ -1318,6 +1318,10 @@ def process_message(message):
         if quality == 'standard' and info:
             captions = fetch_captions(video_url, language, work_dir=work_dir)
             if captions:
+                # The probe may know the video but not its duration; the caption fetch's
+                # own metadata is then the only duration we have, and it is capped too.
+                duration = probed_duration or captions["duration_seconds"]
+                check_duration(duration)
                 publish_progress(
                     message_id=message_id,
                     video_url=video_url,
@@ -1340,7 +1344,6 @@ def process_message(message):
                     start_time=start_time,
                     db_video_id=db_video_id
                 )
-                duration = probed_duration or captions["duration_seconds"]
                 publish_completion_result(
                     message_id=message_id,
                     video_url=video_url,
@@ -1382,9 +1385,14 @@ def process_message(message):
                 raise NonRetryableError(str(e)) from e
             raise
 
-        # Without the probe, take title/date from the downloader's description file and
-        # enforce the duration cap on the downloaded audio (still before any Replicate spend)
+        # Without a probed duration (no probe, or a probe that lacked one), enforce the cap
+        # on the downloaded audio, before any chunk upload or Replicate spend
         audio_duration = None
+        if not probed_duration:
+            audio_duration = get_audio_duration(audio_path)
+            check_duration(audio_duration)
+
+        # Without the probe, take title/date from the downloader's description file
         if not info:
             try:
                 with open(desc_path, 'r', encoding='utf-8') as f:
@@ -1396,8 +1404,6 @@ def process_message(message):
                             video_info["upload_date"] = line.split(":", 1)[1].strip()
             except Exception as e:
                 logger.warning(f"Error reading description file: {e}")
-            audio_duration = get_audio_duration(audio_path)
-            check_duration(audio_duration)
 
         # Download complete progress update
         publish_progress(
@@ -1643,8 +1649,6 @@ def process_message(message):
         if probed_duration:
             duration_seconds = int(round(probed_duration))
         else:
-            if audio_duration is None:
-                audio_duration = get_audio_duration(audio_path)
             duration_seconds = int(audio_duration) if audio_duration else None
         publish_completion_result(
             message_id=message_id,

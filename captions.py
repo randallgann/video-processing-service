@@ -155,35 +155,47 @@ def dedupe_rolling(cues):
     """
     Remove the rolling-caption artefact where each cue repeats (part of) the previous one.
 
-    Compared word by word:
-    - next equals prev or extends it ("hello" -> "hello world"), or is a shorter repeat
-      of prev's opening (2+ words): one cue with the longer text, spanning both;
-    - prev's trailing words repeated at next's head ("a b c d" -> "c d e f"): next keeps
-      only its new words ("e f"), so every word appears once.
-    Distinct cues pass through unchanged. Pure and idempotent.
+    Each cue is compared word by word with the previous cue AS DISPLAYED (its original
+    text), not with what was kept of it, so a chain like "a b c d" -> "c d e f" ->
+    "c d e f g" still yields every word once ("a b c d", "e f g"):
+    - next equals prev or extends it ("hello" -> "hello world"): its new words are
+      appended to the last kept cue, which now spans both;
+    - next is a shorter repeat of prev's opening (2+ words): dropped, span extended;
+    - prev's trailing words repeated at next's head (2+ words, "a b c d" -> "c d e f"):
+      next keeps only its new words ("e f");
+    - anything else is distinct speech and passes through unchanged.
+    Pure and idempotent.
     """
     out = []
+    shown = None  # words of the previous cue as displayed
     for cue in cues:
         cue = dict(cue)
+        next_words = cue["text"].split()
         if out:
-            prev = out[-1]
-            prev_words, next_words = prev["text"].split(), cue["text"].split()
-            grows = len(next_words) >= len(prev_words) and next_words[:len(prev_words)] == prev_words
-            # A shorter cue repeating prev's opening; one word is too weak a signal.
-            repeats_start = (MIN_OVERLAP_WORDS <= len(next_words) < len(prev_words)
-                             and prev_words[:len(next_words)] == next_words)
-            if grows or repeats_start:
-                if grows:
-                    prev["text"] = cue["text"]
-                prev["end"] = max(prev["end"], cue["end"])
+            last = out[-1]
+            if len(next_words) >= len(shown) and next_words[:len(shown)] == shown:
+                added = next_words[len(shown):]
+                if added:
+                    last["text"] = ' '.join(last["text"].split() + added)
+                last["end"] = max(last["end"], cue["end"])
+                shown = next_words
                 continue
-            k = _overlap_words(prev_words, next_words)
+            # A shorter cue repeating prev's opening; one word is too weak a signal.
+            if MIN_OVERLAP_WORDS <= len(next_words) < len(shown) and shown[:len(next_words)] == next_words:
+                last["end"] = max(last["end"], cue["end"])
+                continue
+            k = _overlap_words(shown, next_words)
             if k >= MIN_OVERLAP_WORDS:
                 remainder = next_words[k:]
+                shown = next_words
                 if not remainder:
-                    prev["end"] = max(prev["end"], cue["end"])
+                    last["end"] = max(last["end"], cue["end"])
                     continue
                 cue["text"] = ' '.join(remainder)
+            else:
+                shown = next_words
+        else:
+            shown = next_words
         out.append(cue)
     return out
 

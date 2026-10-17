@@ -193,3 +193,41 @@ def test_fetch_captions_returns_none_on_errors(monkeypatch, tmp_path):
     monkeypatch.setattr('ytdlp_opts.extract_with_bot_check_retry',
                         lambda *a, **k: ({'subtitles': {'en': track()}, 'requested_subtitles': {}}, 'x'))
     assert captions.fetch_captions(VIDEO_INFO['url'], work_dir=str(tmp_path)) is None, 'listed but not written'
+
+
+# Review rework (finding 2): chained rolling cues compare with the previous cue as
+# displayed, not with what was kept of it.
+@pytest.mark.parametrize('cues, expected', [
+    pytest.param([cue(0, 2, 'a b c d'), cue(2, 4, 'c d e f'), cue(4, 6, 'c d e f g')],
+                 [cue(0, 2, 'a b c d'), cue(2, 6, 'e f g')], id='overlap then growth (reviewer repro)'),
+    pytest.param([cue(0, 1, 'a b'), cue(1, 2, 'a b c d'), cue(2, 3, 'c d e f')],
+                 [cue(0, 2, 'a b c d'), cue(2, 3, 'e f')], id='growth then overlap'),
+    pytest.param([cue(0, 1, 'a b c d'), cue(1, 2, 'c d e f'), cue(2, 3, 'e f g h'), cue(3, 4, 'g h i j')],
+                 [cue(0, 1, 'a b c d'), cue(1, 2, 'e f'), cue(2, 3, 'g h'), cue(3, 4, 'i j')],
+                 id='sliding two-line window'),
+    pytest.param([cue(0, 1, 'a b c d'), cue(1, 2, 'c d'), cue(2, 3, 'c d e'), cue(3, 4, 'c d e f')],
+                 [cue(0, 4, 'a b c d e f')], id='overlap with nothing new, then growth'),
+    pytest.param([cue(0, 1, 'a b c d'), cue(1, 2, 'a b'), cue(2, 3, 'a b c d e')],
+                 [cue(0, 3, 'a b c d e')], id='repeat of the opening keeps the longer context'),
+    pytest.param([cue(0, 1, 'a b c d'), cue(1, 2, 'c d e f'), cue(2, 3, 'x y'), cue(3, 4, 'x y z')],
+                 [cue(0, 1, 'a b c d'), cue(1, 2, 'e f'), cue(2, 4, 'x y z')], id='distinct speech resets context'),
+    pytest.param([cue(0, 1, 'a b c d'), cue(1, 2, 'c d e f'), cue(2, 3, 'f g')],
+                 [cue(0, 1, 'a b c d'), cue(1, 2, 'e f'), cue(2, 3, 'f g')], id='one shared word stays speech'),
+])
+def test_dedupe_rolling_chains(cues, expected):
+    before = copy.deepcopy(cues)
+    out = dedupe_rolling(cues)
+    assert out == expected
+    assert cues == before
+    assert dedupe_rolling(out) == out
+
+
+def test_dedupe_rolling_chain_keeps_every_new_word_once():
+    window = 'w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11'.split()
+    cues, t = [], 0.0
+    for i in range(0, len(window) - 3, 2):  # 4-word window sliding 2 words, then growing by one
+        cues.append(cue(t, t + 1, ' '.join(window[i:i + 4])))
+        cues.append(cue(t + 1, t + 2, ' '.join(window[i:i + 5])))
+        t += 2
+    joined = ' '.join(c['text'] for c in dedupe_rolling(cues))
+    assert joined == ' '.join(window)
