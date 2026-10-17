@@ -35,7 +35,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import socketserver
 
 from captions import fetch_captions, format_upload_date, window_segments
-from ytdlp_opts import build_ydl_opts, extract_with_bot_check_retry
+from ytdlp_opts import build_probe_opts, extract_with_bot_check_retry
 
 # Load environment variables
 load_dotenv()
@@ -1202,9 +1202,7 @@ def probe_video(video_url, work_dir):
     which has its own retries, and the duration cap is checked on the downloaded audio.
     """
     try:
-        opts = build_ydl_opts(work_dir, audio=False)
-        for key in ('writesubtitles', 'writeautomaticsub', 'subtitlesformat', 'subtitleslangs'):
-            opts.pop(key, None)
+        opts = build_probe_opts(work_dir)
         info, _ = extract_with_bot_check_retry(opts, video_url, proxied=bool(opts.get('proxy')), download=False)
         return info
     except Exception as e:
@@ -1316,7 +1314,8 @@ def process_message(message):
 
         # 0b. Captions first for standard quality: no download, no Replicate
         if quality == 'standard' and info:
-            captions = fetch_captions(video_url, language, work_dir=work_dir)
+            # The probe already lists the caption tracks: pick from it, download one.
+            captions = fetch_captions(video_url, language, work_dir=work_dir, info=info)
             if captions:
                 # The probe may know the video but not its duration; the caption fetch's
                 # own metadata is then the only duration we have, and it is capped too.

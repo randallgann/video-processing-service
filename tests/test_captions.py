@@ -157,6 +157,40 @@ def test_normalize_language_and_upload_date():
 
 
 # fetch_captions glue (yt-dlp stubbed; no network)
+def test_fetch_captions_downloads_only_the_picked_track(monkeypatch, tmp_path, json3):
+    """Live-check rework: pick from metadata first, then one download of exactly that code."""
+    written = tmp_path / 'Captioned.en-US.json3'
+    written.write_text(json.dumps(json3), encoding='utf-8')
+    listing = {'id': 'abc123def45', 'title': 'Captioned', 'duration': 196.4, 'subtitles': {'en-US': track('en-US')},
+               'automatic_captions': {'en': track(), 'en-en': track(translated=True), 'en-de': track('de', translated=True)}}
+    downloaded = dict(listing, requested_subtitles={'en-US': {'ext': 'json3', 'filepath': str(written)}})
+    calls = []
+
+    def fake_extract(opts, url, proxied, download=True):
+        calls.append({'download': download, 'langs': opts.get('subtitleslangs'), 'write': opts.get('writesubtitles')})
+        return (downloaded if download else listing), 'x'
+
+    monkeypatch.setattr('ytdlp_opts.extract_with_bot_check_retry', fake_extract)
+
+    # With the worker's probe info: exactly one request, for exactly the picked code.
+    result = captions.fetch_captions(VIDEO_INFO['url'], 'en', work_dir=str(tmp_path), info=listing)
+    assert result['language'] == 'en-US' and result['kind'] == 'manual'
+    assert calls == [{'download': True, 'langs': ['en\\-US'], 'write': True}]
+
+    # Without it: one metadata-only extraction (writes nothing), then the same single download.
+    calls.clear()
+    assert captions.fetch_captions(VIDEO_INFO['url'], 'en', work_dir=str(tmp_path))['language'] == 'en-US'
+    assert calls == [{'download': False, 'langs': None, 'write': None}, {'download': True, 'langs': ['en\\-US'], 'write': True}]
+
+
+def test_fetch_captions_downloads_nothing_without_a_usable_track(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr('ytdlp_opts.extract_with_bot_check_retry', lambda *a, **k: calls.append(k) or ({}, 'x'))
+    info = {'subtitles': {}, 'automatic_captions': {'en': track(translated=True), 'es-orig': track('es')}}
+    assert captions.fetch_captions(VIDEO_INFO['url'], 'en', work_dir=str(tmp_path), info=info) is None
+    assert calls == []
+
+
 def test_fetch_captions_reads_the_written_track(monkeypatch, tmp_path, json3):
     written = tmp_path / 'Captioned.en.json3'
     written.write_text(json.dumps(json3), encoding='utf-8')

@@ -6,6 +6,7 @@ pinning, same cookie fallback, same 403/429/bot-check retry.
 """
 import os
 import random
+import re
 import shutil
 import time
 import urllib.parse
@@ -18,6 +19,7 @@ RETRYABLE_MARKERS = (
     "confirm you’re not a bot",
     "HTTP Error 403",
     "HTTP Error 429",
+    "Too Many Requests",
 )
 
 
@@ -79,8 +81,10 @@ def build_ydl_opts(download_path, *, audio, lang='en'):
     yt-dlp options for one job.
 
     audio=True: download the best audio and convert it to mp3 (the Whisper path).
-    audio=False: download nothing but the json3 caption tracks for `lang` and its
-    regional variants (en, en-US, en-orig, ...). captions.pick_track chooses among them.
+    audio=False: download nothing but the json3 caption track whose code is exactly
+    `lang` — the code captions.pick_track already chose (e.g. 'en-US'). yt-dlp treats
+    subtitleslangs entries as regexes, so the code is escaped: one track, one timedtext
+    request, never the auto-translated variants a pattern like 'en-.*' would also match.
     """
     ydl_opts = {
         'paths': {'home': download_path},  # Set the base download path
@@ -118,8 +122,7 @@ def build_ydl_opts(download_path, *, audio, lang='en'):
             'writesubtitles': True,
             'writeautomaticsub': True,
             'subtitlesformat': 'json3',
-            # yt-dlp matches these as regexes against the track language codes.
-            'subtitleslangs': [lang, f'{lang}-.*'],
+            'subtitleslangs': [re.escape(lang)],
         })
 
     # Preferred anti-bot path: route through a residential proxy. YouTube blocks
@@ -155,3 +158,11 @@ def build_ydl_opts(download_path, *, audio, lang='en'):
               f"downloads will likely fail with bot-detection from datacenter IPs")
 
     return ydl_opts
+
+
+def build_probe_opts(download_path):
+    """Metadata-only extraction (duration, title, caption track listing); writes nothing."""
+    opts = build_ydl_opts(download_path, audio=False)
+    for key in ('writesubtitles', 'writeautomaticsub', 'subtitlesformat', 'subtitleslangs'):
+        opts.pop(key, None)
+    return opts

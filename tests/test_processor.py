@@ -42,8 +42,9 @@ def worker(processor, monkeypatch, tmp_path):
         calls['probe'] += 1
         return state['info']
 
-    def fetch_captions(url, lang='en', *, work_dir):
+    def fetch_captions(url, lang='en', *, work_dir, info=None):
         calls['fetch_captions'].append(lang)
+        calls['fetch_info'] = info
         return state['captions']
 
     def download_video(url, out_dir):
@@ -90,6 +91,7 @@ def test_standard_with_captions_skips_download(worker, payload):
     message = run(payload)
     assert calls['download'] == 0 and calls['transcribe'] == 0
     assert calls['fetch_captions'] == ['en']
+    assert calls['fetch_info'] == INFO, 'the probe info is reused: pick from it, download one track'
     assert message.acks == 1
     [completion] = calls['completions']
     assert completion['status'] == 'completed'

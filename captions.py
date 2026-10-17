@@ -221,24 +221,32 @@ def _caption_file(info, code, work_dir):
     return matches[0] if matches else None
 
 
-def fetch_captions(url, lang='en', *, work_dir):
+def fetch_captions(url, lang='en', *, work_dir, info=None):
     """
     Download the video's caption track and convert it to transcript entries.
+
+    The track is chosen from the video's metadata first (`info`, the worker's probe, or
+    a metadata-only extraction when absent), then ONLY that exact track is downloaded:
+    one timedtext request per video, none when there is no usable track.
 
     Returns {segments, language, kind, duration_seconds, title, channel_title,
     upload_date}, or None when there is no usable track. Never raises: any failure is
     logged and returns None so the caller falls back to Whisper.
     """
-    from ytdlp_opts import build_ydl_opts, extract_with_bot_check_retry
+    from ytdlp_opts import build_probe_opts, build_ydl_opts, extract_with_bot_check_retry
 
     try:
-        opts = build_ydl_opts(work_dir, audio=False, lang=lang)
-        info, _ = extract_with_bot_check_retry(opts, url, proxied=bool(opts.get('proxy')))
+        if info is None:
+            probe_opts = build_probe_opts(work_dir)
+            info, _ = extract_with_bot_check_retry(probe_opts, url, proxied=bool(probe_opts.get('proxy')), download=False)
         picked = pick_track(info, lang)
         if not picked:
             logger.info(f"No usable '{lang}' caption track for {url}")
             return None
         code, kind = picked
+        logger.info(f"Fetching {kind} caption track {code} for {url}")
+        opts = build_ydl_opts(work_dir, audio=False, lang=code)
+        info, _ = extract_with_bot_check_retry(opts, url, proxied=bool(opts.get('proxy')))
         path = _caption_file(info, code, work_dir)
         if not path:
             logger.warning(f"Caption track {code} ({kind}) was listed but no json3 file was written")
