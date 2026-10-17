@@ -371,3 +371,75 @@ def test_dockerfile_copies_new_modules():
         dockerfile = f.read()
     for name in ('ytdlp_opts.py', 'captions.py', 'cloud-vm-processor.py', 'yt-dlp-aduio-processor-v1.py'):
         assert f'COPY {name} /app/' in dockerfile
+
+
+# Live-check rework 2: permanent yt-dlp failures are failed + acked, never redelivered.
+@pytest.mark.parametrize('message, expected', [
+    ("ERROR: [youtube] Tq92D6wQ1mg: Sign in to confirm your age. This video may be inappropriate for some users.", 'permanent'),
+    ("ERROR: [youtube] abc: Private video. Sign in if you've been granted access to this video", 'permanent'),
+    ("ERROR: [youtube] abc: Video unavailable", 'permanent'),
+    ("ERROR: [youtube] abc: Video unavailable. This video has been removed by the uploader", 'permanent'),
+    ("ERROR: [youtube] abc: This video has been removed for violating YouTube's Terms of Service", 'permanent'),
+    ("ERROR: [youtube] abc: Video unavailable. This video is no longer available because the YouTube account "
+     "associated with this video has been terminated.", 'permanent'),
+    ("ERROR: [youtube] abc: Join this channel to get access to members-only content like this video, and other exclusive perks.", 'permanent'),
+    ("ERROR: [youtube] abc: This video is available to this channel's members on level: Tier 1", 'permanent'),
+    ("ERROR: [youtube] abc: The uploader has not made this video available in your country", 'permanent'),
+    ("ERROR: [youtube] abc: This video is not available from your location due to geo restriction", 'permanent'),
+    # YouTube throttling this IP/session, despite the "unavailable" wording: keep retrying
+    ("ERROR: [youtube] abc: Video unavailable. This content isn’t available.", 'retry'),
+    ("ERROR: [youtube] abc: Video unavailable. This content isn't available, try again later.", 'retry'),
+    # the bot check stays its own class (retryable across proxies; terminal only after the budget)
+    ("ERROR: [youtube] abc: Sign in to confirm you’re not a bot. Use --cookies-from-browser", 'bot_check'),
+    ("ERROR: [youtube] abc: Sign in to confirm you're not a bot", 'bot_check'),
+    # everything else: unchanged (redelivery)
+    ("ERROR: [youtube] abc: HTTP Error 429: Too Many Requests", 'retry'),
+    ("ERROR: unable to download video data: <urlopen error timed out>", 'retry'),
+    ("", 'retry'),
+    (None, 'retry'),
+])
+def test_classify_failure(processor, message, expected):
+    assert processor.classify_failure(message) == expected
+
+
+def test_age_gated_download_failure_is_failed_and_acked(worker):
+    run, calls, state = worker
+    state['info'] = None
+    state['captions'] = None
+    state['download_error'] = ("Failed to download video: ERROR: [youtube] Tq92D6wQ1mg: Sign in to confirm your age. "
+                               "This video may be inappropriate for some users.")
+    message = run(request())
+    assert message.acks == 1
+    [completion] = calls['completions']
+    assert completion['status'] == 'failed'
+    assert 'confirm your age' in completion['error']
+    assert calls['transcribe'] == 0
+
+
+def test_permanent_probe_failure_fails_and_acks_without_downloading(worker, processor, monkeypatch):
+    run, calls, _ = worker
+
+    def gated_probe(url, work_dir):
+        raise processor.NonRetryableError('ERROR: [youtube] Tq92D6wQ1mg: Sign in to confirm your age')
+
+    monkeypatch.setattr(processor, 'probe_video', gated_probe)
+    message = run(request())
+    assert message.acks == 1
+    assert calls['download'] == 0 and calls['fetch_captions'] == []
+    assert calls['completions'][0]['status'] == 'failed'
+
+
+def test_probe_video_raises_non_retryable_only_for_permanent_errors(processor, monkeypatch, tmp_path):
+    def raising(message):
+        def extract(*args, **kwargs):
+            raise processor_download_error(message)
+        return extract
+
+    processor_download_error = Exception
+    monkeypatch.setattr(processor, 'extract_with_bot_check_retry', raising('ERROR: [youtube] x: Private video'))
+    with pytest.raises(processor.NonRetryableError):
+        processor.probe_video(URL, str(tmp_path))
+    monkeypatch.setattr(processor, 'extract_with_bot_check_retry', raising('ERROR: [youtube] x: HTTP Error 429'))
+    assert processor.probe_video(URL, str(tmp_path)) is None
+    monkeypatch.setattr(processor, 'extract_with_bot_check_retry', raising("Sign in to confirm you're not a bot"))
+    assert processor.probe_video(URL, str(tmp_path)) is None, 'bot check after the probe budget: still try the download path'

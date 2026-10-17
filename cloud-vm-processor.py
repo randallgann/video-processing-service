@@ -1169,6 +1169,42 @@ class NonRetryableError(RuntimeError):
 
 BOT_CHECK_MARKERS = ("not a bot",)
 
+# YouTube/yt-dlp failures no retry or redelivery can fix: the video itself is gated,
+# gone or blocked. Matched case-insensitively with typographic apostrophes folded.
+PERMANENT_FAILURE_MARKERS = (
+    "confirm your age",                                  # age gate: needs a signed-in adult account
+    "private video",
+    "this video has been removed",                       # policy / uploader removal
+    "account associated with this video has been terminated",
+    "this video is no longer available",
+    "members-only",                                      # "Join this channel to get access to members-only content"
+    "available to this channel's members",
+    "available in your country",                         # geo-blocked: "...not (made this video) available in your country"
+    "not available from your location",                  # geo-blocked (yt-dlp GeoRestrictedError)
+    "video unavailable",
+)
+# Wording that looks permanent but is YouTube throttling this IP/session: keep retrying.
+TRANSIENT_OVERRIDE_MARKERS = (
+    "content isn't available",                           # "Video unavailable. This content isn't available."
+    "try again later",
+)
+
+
+def classify_failure(message):
+    """
+    'permanent' (fail + ack: retrying cannot help), 'bot_check' (retryable across
+    proxies; non-retryable only once the downloader's full attempt budget is spent), or
+    'retry' (anything else: leave to redelivery as before).
+    """
+    text = (message or '').replace('\u2019', "'").lower()
+    if any(marker in text for marker in BOT_CHECK_MARKERS):
+        return 'bot_check'
+    if any(marker in text for marker in TRANSIENT_OVERRIDE_MARKERS):
+        return 'retry'
+    if any(marker in text for marker in PERMANENT_FAILURE_MARKERS):
+        return 'permanent'
+    return 'retry'
+
 
 def resolve_quality(value):
     """Request `quality`; absent means standard, anything unknown is standard with a warning."""
@@ -1206,6 +1242,9 @@ def probe_video(video_url, work_dir):
         info, _ = extract_with_bot_check_retry(opts, video_url, proxied=bool(opts.get('proxy')), download=False)
         return info
     except Exception as e:
+        if classify_failure(str(e)) == 'permanent':
+            # Gated, gone or blocked: downloading would fail the same way.
+            raise NonRetryableError(str(e)) from e
         logger.warning(f"Pre-download probe failed for {video_url}: {e}")
         return None
 
@@ -1379,8 +1418,9 @@ def process_message(message):
         try:
             audio_path, desc_path = download_video(video_url, work_dir)
         except Exception as e:
-            # The downloader already walked the proxy pool; a redelivery would hit the same wall.
-            if any(marker in str(e).lower() for marker in BOT_CHECK_MARKERS):
+            # Bot check: the downloader already walked the proxy pool, a redelivery would hit
+            # the same wall. Permanent: the video is gated, gone or blocked.
+            if classify_failure(str(e)) in ('bot_check', 'permanent'):
                 raise NonRetryableError(str(e)) from e
             raise
 
