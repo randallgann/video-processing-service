@@ -225,12 +225,16 @@ USE_WAV_FORMAT=true              # Convert chunks to WAV
 TMPDIR=/tmp/transcription        # Writable temp directory
 LOG_LEVEL=INFO                   # Logging verbosity
 MAX_VIDEO_DURATION_SECONDS=14400  # Over this, fail (and ack) before downloading
+CAPTIONS_ATTEMPTS=1              # Proxy attempts per caption extraction (download keeps YTDLP_BOT_CHECK_ATTEMPTS)
+CAPTIONS_ENABLED=true            # false/0/no/off: standard goes straight to Whisper
 ```
 
 ### Request / completion contract (T2)
 - Request `quality`: `standard` (default when absent) tries the YouTube caption track
   first and falls back to Whisper; `whisper` always uses Whisper. `model_type` still
   picks which Whisper. Request `language` (default `en`) picks the caption track.
+  `standard` tries captions once (`CAPTIONS_ATTEMPTS`) and can be switched off
+  (`CAPTIONS_ENABLED=false`).
 - Completion adds, only when known: `transcript_source` (`captions`|`whisper`),
   `language` (caption track language, else the request's), `duration_seconds`, `title`,
   `channel_title`. Legacy consumers see the old fields unchanged.

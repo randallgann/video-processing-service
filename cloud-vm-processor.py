@@ -34,7 +34,7 @@ from google.cloud import storage
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import socketserver
 
-from captions import fetch_captions, format_upload_date, window_segments
+from captions import captions_enabled, fetch_captions, format_upload_date, window_segments
 from ytdlp_opts import build_probe_opts, extract_with_bot_check_retry
 
 # Load environment variables
@@ -1352,7 +1352,7 @@ def process_message(message):
         channel_title = (info.get("channel") or info.get("uploader")) if info else None
 
         # 0b. Captions first for standard quality: no download, no Replicate
-        if quality == 'standard' and info:
+        if quality == 'standard' and info and captions_enabled():
             # The probe already lists the caption tracks: pick from it, download one.
             captions = fetch_captions(video_url, language, work_dir=work_dir, info=info)
             if captions:
@@ -1400,6 +1400,8 @@ def process_message(message):
                             f"({captions['language']}); results at {result_url}")
                 return
             logger.info("No captions, falling back to Whisper")
+        elif quality == 'standard' and info:
+            logger.info("Captions disabled (CAPTIONS_ENABLED=false); using Whisper")
         elif quality == 'standard':
             logger.info("Metadata probe failed; skipping captions and going straight to Whisper")
 

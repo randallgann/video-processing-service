@@ -46,7 +46,7 @@ def proxy_for_attempt(proxy, attempt):
 PROXY_START = random.randrange(1000)
 
 
-def extract_with_bot_check_retry(ydl_opts, url, proxied, download=True):
+def extract_with_bot_check_retry(ydl_opts, url, proxied, download=True, attempts=None):
     """
     Download with yt-dlp, retrying failures that depend on the proxy exit IP.
 
@@ -58,8 +58,12 @@ def extract_with_bot_check_retry(ydl_opts, url, proxied, download=True):
     2026-10-04: per-request rotation failed downloads with 403 (IP-bound media URLs) and
     some exit IPs hit the bot check, while others pass. Without a proxy the IP never
     changes, so retrying is pointless and we fail fast.
+
+    attempts, when given, replaces the YTDLP_BOT_CHECK_ATTEMPTS budget for this call (the
+    captions path passes CAPTIONS_ATTEMPTS, default 1); unproxied calls still make one attempt.
     """
-    attempts = int(os.environ.get('YTDLP_BOT_CHECK_ATTEMPTS', '10')) if proxied else 1
+    budget = attempts if attempts is not None else int(os.environ.get('YTDLP_BOT_CHECK_ATTEMPTS', '10'))
+    attempts = max(1, budget) if proxied else 1
     for attempt in range(1, attempts + 1):
         opts = dict(ydl_opts)
         if proxied:

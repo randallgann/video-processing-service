@@ -443,3 +443,37 @@ def test_probe_video_raises_non_retryable_only_for_permanent_errors(processor, m
     assert processor.probe_video(URL, str(tmp_path)) is None
     monkeypatch.setattr(processor, 'extract_with_bot_check_retry', raising("Sign in to confirm you're not a bot"))
     assert processor.probe_video(URL, str(tmp_path)) is None, 'bot check after the probe budget: still try the download path'
+
+
+# Captions fail-fast hotfix: CAPTIONS_ENABLED kill switch
+@pytest.mark.parametrize('value', ['false', 'OFF', '0', 'no'])
+def test_captions_disabled_goes_straight_to_whisper(worker, monkeypatch, caplog, value):
+    monkeypatch.setenv('CAPTIONS_ENABLED', value)
+    run, calls, _ = worker
+    with caplog.at_level(logging.INFO):
+        message = run(request(quality='standard'))
+    assert calls['fetch_captions'] == []
+    assert calls['probe'] == 1, 'the probe still runs (duration cap)'
+    assert calls['download'] == 1 and calls['transcribe'] == 1
+    assert message.acks == 1
+    [completion] = calls['completions']
+    assert completion['status'] == 'completed' and completion['transcript_source'] == 'whisper'
+    assert caplog.text.count('Captions disabled (CAPTIONS_ENABLED=false); using Whisper') == 1
+    assert 'Metadata probe failed' not in caplog.text
+
+
+def test_captions_enabled_explicitly_still_uses_captions(worker, monkeypatch):
+    monkeypatch.setenv('CAPTIONS_ENABLED', 'true')
+    run, calls, _ = worker
+    run(request(quality='standard'))
+    assert calls['fetch_captions'] == ['en'] and calls['download'] == 0
+
+
+def test_whisper_quality_unaffected_by_the_kill_switch(worker, monkeypatch, caplog):
+    monkeypatch.setenv('CAPTIONS_ENABLED', 'false')
+    run, calls, _ = worker
+    with caplog.at_level(logging.INFO):
+        run(request(quality='whisper'))
+    assert calls['fetch_captions'] == [] and calls['download'] == 1
+    assert calls['completions'][0]['transcript_source'] == 'whisper'
+    assert 'Captions disabled' not in caplog.text

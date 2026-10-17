@@ -153,3 +153,58 @@ def test_subtitle_429_uses_the_full_proxy_retry_budget(monkeypatch):
 
 def test_too_many_requests_without_the_status_code_is_retryable():
     assert any(m in 'Unable to download video subtitles: Too Many Requests' for m in ytdlp_opts.RETRYABLE_MARKERS)
+
+
+def _failing_ydl(monkeypatch, proxies):
+    class FakeYDL:
+        def __init__(self, opts):
+            proxies.append(opts.get('proxy'))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def extract_info(self, url, download):
+            raise ytdlp_opts.yt_dlp.utils.DownloadError(
+                "ERROR: Unable to download video subtitles for 'en': HTTP Error 429: Too Many Requests")
+
+        def prepare_filename(self, info):
+            return 'x'
+
+    monkeypatch.setattr(ytdlp_opts.yt_dlp, 'YoutubeDL', FakeYDL)
+    monkeypatch.setattr(ytdlp_opts.time, 'sleep', lambda s: None)
+    monkeypatch.setattr(ytdlp_opts, 'PROXY_START', 0)
+
+
+def test_attempts_override_makes_exactly_one_attempt_on_a_proxied_429(monkeypatch):
+    """Captions fail-fast: attempts=1 raises after ONE attempt even with the env budget at 10."""
+    monkeypatch.setenv('YTDLP_BOT_CHECK_ATTEMPTS', '10')
+    proxies = []
+    _failing_ydl(monkeypatch, proxies)
+    with pytest.raises(ytdlp_opts.yt_dlp.utils.DownloadError):
+        ytdlp_opts.extract_with_bot_check_retry({'proxy': 'http://user-rotate:pw@p.example:80'}, 'u', proxied=True, attempts=1)
+    assert len(proxies) == 1
+
+
+def test_without_the_override_the_env_budget_still_applies(monkeypatch):
+    monkeypatch.setenv('YTDLP_BOT_CHECK_ATTEMPTS', '3')
+    proxies = []
+    _failing_ydl(monkeypatch, proxies)
+    with pytest.raises(ytdlp_opts.yt_dlp.utils.DownloadError):
+        ytdlp_opts.extract_with_bot_check_retry({'proxy': 'http://user-rotate:pw@p.example:80'}, 'u', proxied=True)
+    assert len(proxies) == 3
+
+
+@pytest.mark.parametrize('attempts, expected', [(2, 2), (0, 1)])
+def test_attempts_override_is_floored_at_one_and_unproxied_is_one(monkeypatch, attempts, expected):
+    proxies = []
+    _failing_ydl(monkeypatch, proxies)
+    with pytest.raises(ytdlp_opts.yt_dlp.utils.DownloadError):
+        ytdlp_opts.extract_with_bot_check_retry({'proxy': 'http://user-rotate:pw@p.example:80'}, 'u', proxied=True, attempts=attempts)
+    assert len(proxies) == expected
+    proxies.clear()
+    with pytest.raises(ytdlp_opts.yt_dlp.utils.DownloadError):
+        ytdlp_opts.extract_with_bot_check_retry({}, 'u', proxied=False, attempts=5)
+    assert len(proxies) == 1

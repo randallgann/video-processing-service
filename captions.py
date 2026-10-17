@@ -21,6 +21,25 @@ WINDOW_SECONDS = 60.0  # 1 minute chunks
 MIN_OVERLAP_WORDS = 2
 
 
+def captions_attempts():
+    """
+    Proxy attempts per caption extraction (CAPTIONS_ATTEMPTS, default 1, floor 1).
+
+    Captions are a cheap first try, not worth walking the proxy pool for: a 429 or bot
+    check fails over to Whisper after this many attempts instead of the download's
+    YTDLP_BOT_CHECK_ATTEMPTS. Read at call time.
+    """
+    try:
+        return max(1, int(os.environ.get('CAPTIONS_ATTEMPTS', '1')))
+    except ValueError:
+        return 1
+
+
+def captions_enabled():
+    """CAPTIONS_ENABLED kill switch (default on; false/0/no/off, any case, turns it off). Read at call time."""
+    return os.environ.get('CAPTIONS_ENABLED', 'true').strip().lower() not in ('false', '0', 'no', 'off')
+
+
 def window_segments(all_segments, video_info):
     """
     Group timed segments into ~60 s windows and wrap them in the transcript entry shape.
@@ -238,7 +257,8 @@ def fetch_captions(url, lang='en', *, work_dir, info=None):
     try:
         if info is None:
             probe_opts = build_probe_opts(work_dir)
-            info, _ = extract_with_bot_check_retry(probe_opts, url, proxied=bool(probe_opts.get('proxy')), download=False)
+            info, _ = extract_with_bot_check_retry(probe_opts, url, proxied=bool(probe_opts.get('proxy')), download=False,
+                                                   attempts=captions_attempts())
         picked = pick_track(info, lang)
         if not picked:
             logger.info(f"No usable '{lang}' caption track for {url}")
@@ -246,7 +266,7 @@ def fetch_captions(url, lang='en', *, work_dir, info=None):
         code, kind = picked
         logger.info(f"Fetching {kind} caption track {code} for {url}")
         opts = build_ydl_opts(work_dir, audio=False, lang=code)
-        info, _ = extract_with_bot_check_retry(opts, url, proxied=bool(opts.get('proxy')))
+        info, _ = extract_with_bot_check_retry(opts, url, proxied=bool(opts.get('proxy')), attempts=captions_attempts())
         path = _caption_file(info, code, work_dir)
         if not path:
             logger.warning(f"Caption track {code} ({kind}) was listed but no json3 file was written")

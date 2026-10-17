@@ -166,7 +166,7 @@ def test_fetch_captions_downloads_only_the_picked_track(monkeypatch, tmp_path, j
     downloaded = dict(listing, requested_subtitles={'en-US': {'ext': 'json3', 'filepath': str(written)}})
     calls = []
 
-    def fake_extract(opts, url, proxied, download=True):
+    def fake_extract(opts, url, proxied, download=True, attempts=None):
         calls.append({'download': download, 'langs': opts.get('subtitleslangs'), 'write': opts.get('writesubtitles')})
         return (downloaded if download else listing), 'x'
 
@@ -199,7 +199,7 @@ def test_fetch_captions_reads_the_written_track(monkeypatch, tmp_path, json3):
             'requested_subtitles': {'en': {'ext': 'json3', 'filepath': str(written)}}}
     seen = {}
 
-    def fake_extract(opts, url, proxied, download=True):
+    def fake_extract(opts, url, proxied, download=True, attempts=None):
         seen.update(opts=opts, url=url, proxied=proxied, download=download)
         return info, str(tmp_path / 'Captioned.mp4')
 
@@ -265,3 +265,56 @@ def test_dedupe_rolling_chain_keeps_every_new_word_once():
         t += 2
     joined = ' '.join(c['text'] for c in dedupe_rolling(cues))
     assert joined == ' '.join(window)
+
+
+# Captions fail-fast hotfix: CAPTIONS_ATTEMPTS / CAPTIONS_ENABLED
+@pytest.mark.parametrize('value, expected', [(None, 1), ('3', 3), ('1', 1), ('0', 1), ('-2', 1), ('garbage', 1), ('', 1)])
+def test_captions_attempts(monkeypatch, value, expected):
+    if value is None:
+        monkeypatch.delenv('CAPTIONS_ATTEMPTS', raising=False)
+    else:
+        monkeypatch.setenv('CAPTIONS_ATTEMPTS', value)
+    assert captions.captions_attempts() == expected
+
+
+@pytest.mark.parametrize('value, expected', [(None, True), ('true', True), ('1', True), ('yes', True),
+                                             ('false', False), ('0', False), ('no', False), ('off', False),
+                                             ('FALSE', False), (' Off ', False)])
+def test_captions_enabled(monkeypatch, value, expected):
+    if value is None:
+        monkeypatch.delenv('CAPTIONS_ENABLED', raising=False)
+    else:
+        monkeypatch.setenv('CAPTIONS_ENABLED', value)
+    assert captions.captions_enabled() is expected
+
+
+@pytest.mark.parametrize('env, expected', [(None, 1), ('2', 2)])
+def test_fetch_captions_passes_the_captions_budget_on_both_calls(monkeypatch, tmp_path, json3, env, expected):
+    if env is None:
+        monkeypatch.delenv('CAPTIONS_ATTEMPTS', raising=False)
+    else:
+        monkeypatch.setenv('CAPTIONS_ATTEMPTS', env)
+    monkeypatch.setenv('YTDLP_BOT_CHECK_ATTEMPTS', '10')
+    written = tmp_path / 'Captioned.en.json3'
+    written.write_text(json.dumps(json3), encoding='utf-8')
+    listing = {'id': 'abc123def45', 'title': 'Captioned', 'subtitles': {}, 'automatic_captions': {'en': track()}}
+    downloaded = dict(listing, requested_subtitles={'en': {'ext': 'json3', 'filepath': str(written)}})
+    calls = []
+
+    def fake_extract(opts, url, proxied, download=True, attempts=None):
+        calls.append((download, attempts))
+        return (downloaded if download else listing), 'x'
+
+    monkeypatch.setattr('ytdlp_opts.extract_with_bot_check_retry', fake_extract)
+    assert captions.fetch_captions(VIDEO_INFO['url'], 'en', work_dir=str(tmp_path)) is not None
+    assert calls == [(False, expected), (True, expected)], 'the probe (info=None) and the download'
+    calls.clear()
+    assert captions.fetch_captions(VIDEO_INFO['url'], 'en', work_dir=str(tmp_path), info=listing) is not None
+    assert calls == [(True, expected)]
+
+
+def test_audio_download_and_metadata_probe_keep_the_env_budget():
+    """Only captions.py passes attempts=: the downloader and the processor's probe call sites are untouched."""
+    for name in ('cloud-vm-processor.py', 'yt-dlp-aduio-processor-v1.py'):
+        source = open(os.path.join(os.path.dirname(captions.__file__), name), encoding='utf-8').read()
+        assert 'attempts=' not in source, name
