@@ -1,0 +1,25 @@
+import pytest
+import captions
+import ytdlp_opts
+
+@pytest.mark.parametrize('budget', [None, '3'])
+@pytest.mark.parametrize('known_info', [None, {'subtitles': {'en': [{'ext': 'json3', 'url': 'https://invalid.test/caption'}]}}])
+def test_real_caption_retry_chain_is_bounded(monkeypatch,tmp_path,budget,known_info):
+    monkeypatch.setenv('YTDLP_BOT_CHECK_ATTEMPTS','10')
+    if budget is None: monkeypatch.delenv('CAPTIONS_ATTEMPTS',raising=False)
+    else: monkeypatch.setenv('CAPTIONS_ATTEMPTS',budget)
+    calls=[]
+    sleeps=[]
+    class FakeYDL:
+        def __init__(self,opts): calls.append(opts)
+        def __enter__(self): return self
+        def __exit__(self,*args): return False
+        def extract_info(self,*args,**kwargs):
+            raise ytdlp_opts.yt_dlp.utils.DownloadError('HTTP Error 429: Too Many Requests')
+    monkeypatch.setattr(ytdlp_opts.yt_dlp,'YoutubeDL',FakeYDL)
+    monkeypatch.setattr(ytdlp_opts.time,'sleep',sleeps.append)
+    monkeypatch.setattr(ytdlp_opts,'build_probe_opts',lambda *a:{'proxy':'http://example.invalid:80'})
+    monkeypatch.setattr(ytdlp_opts,'build_ydl_opts',lambda *a,**k:{'proxy':'http://example.invalid:80'})
+    assert captions.fetch_captions('https://youtu.be/abc123def45','en',work_dir=str(tmp_path),info=known_info) is None
+    assert len(calls)==(int(budget) if budget else 1)
+    assert len(sleeps)==len(calls)-1
