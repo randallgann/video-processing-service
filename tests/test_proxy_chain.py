@@ -581,3 +581,58 @@ def test_the_state_file_never_holds_a_credential(monkeypatch, tmp_path):
     extract()
     chain.acquire(chain.providers[1])
     assert_clean((tmp_path / proxy_chain.STATE_FILE).read_text())
+
+
+# R10a: short credentials are redacted too
+SHORT_URL = 'http://abc:xyz@host:8080'
+
+
+def assert_no_short(*texts):
+    for text in texts:
+        assert 'abc' not in text and 'xyz' not in text
+
+
+def test_short_credentials_are_redacted_in_the_retry_diagnostic_and_the_raised_error(monkeypatch, capsys):
+    use_chain(monkeypatch, StaticProvider('phone', SHORT_URL, attempts=2))
+    fake_ydl(monkeypatch, lambda p: f'HTTP Error 429 via {p}; proxy user abc, password xyz')
+    with pytest.raises(ytdlp_opts.yt_dlp.utils.DownloadError) as raised:
+        extract()
+    out, err = capsys.readouterr()
+    assert 'http://***@host:8080' in out
+    assert_no_short(out, err, str(raised.value), repr(raised.value))
+    assert_unchained(raised.value)
+
+
+def test_short_credentials_are_redacted_in_a_non_retryable_and_another_exception(monkeypatch):
+    use_chain(monkeypatch, StaticProvider('phone', SHORT_URL))
+    fake_ydl(monkeypatch, lambda p: f'{PRIVATE} (abc/xyz)')
+    with pytest.raises(ytdlp_opts.yt_dlp.utils.DownloadError) as raised:
+        extract()
+    assert_no_short(str(raised.value))
+
+    class Boom:
+        def __init__(self, opts):
+            raise OSError(f"proxy {opts['proxy']} refused abc")
+
+    monkeypatch.setattr(ytdlp_opts.yt_dlp, 'YoutubeDL', Boom)
+    with pytest.raises(RuntimeError) as raised:
+        extract()
+    assert_no_short(str(raised.value))
+    assert_unchained(raised.value)
+
+
+def test_short_credentials_are_redacted_in_yt_dlp_own_output(capsys):
+    real = ytdlp_opts.yt_dlp
+    if not isinstance(real.YoutubeDL, type) or real.YoutubeDL is object:
+        pytest.skip('yt-dlp not installed')
+    logger = ytdlp_opts._RedactingLogger(ProxyChain([StaticProvider('phone', SHORT_URL)]).secrets())
+    with real.YoutubeDL({'logger': logger, 'quiet': False}) as ydl:
+        ydl.to_screen(f'[info] via {SHORT_URL} as abc')
+        ydl.report_warning('password xyz rejected')
+        with pytest.raises(real.utils.DownloadError):
+            ydl.report_error(f'boom via {SHORT_URL}')
+    out, err = capsys.readouterr()
+    assert '[info] via http://***@host:8080 as ***' in out
+    assert 'WARNING: password *** rejected' in err
+    assert 'ERROR: boom via http://***@host:8080' in err
+    assert_no_short(out, err)

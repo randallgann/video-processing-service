@@ -52,9 +52,12 @@ def url_secrets(url):
 
 
 def redact(text, secrets=()):
-    """Text with every URL's userinfo replaced by *** and any known credential fragment removed."""
+    """
+    Text with every URL's userinfo replaced by *** and every known credential fragment removed,
+    however short (R10a): over-redacting a short fragment is accepted, leaking one is not.
+    """
     text = _USERINFO.sub(r'\1***@', str(text))
-    for secret in sorted({s for s in secrets if s and len(s) >= 4}, key=len, reverse=True):
+    for secret in sorted({s for s in secrets if s}, key=len, reverse=True):
         text = text.replace(secret, '***')
     return text
 
