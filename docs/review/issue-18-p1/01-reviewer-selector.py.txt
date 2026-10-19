@@ -1,0 +1,17 @@
+from yt_dlp import YoutubeDL
+CAP='bestaudio[abr<=64]/worstaudio/bestaudio/best'
+def audio(id,abr,ext='m4a',codec='mp4a'):
+ f={'format_id':id,'ext':ext,'acodec':codec,'vcodec':'none','url':'https://example.invalid/'+id}
+ if abr is not None:f.update(abr=abr,tbr=abr)
+ return f
+formats=[audio('139',48.8),audio('249',50.1,'webm','opus'),audio('140',129.5),audio('251',133.9,'webm','opus')]
+cases=[('capped',CAP,formats,'249'),('uncapped','bestaudio/best',formats,'251'),
+ ('no stream under cap',CAP,formats[2:],'140'),('unknown abr only',CAP,[audio('unknown',None)],'unknown'),
+ ('muxed only',CAP,[{'format_id':'18','ext':'mp4','acodec':'aac','vcodec':'avc1','url':'https://example.invalid/18'}],'18')]
+with YoutubeDL({'quiet':True}) as ydl:
+ for label,expr,fs,wanted in cases:
+  info={'formats':[dict(f) for f in fs]};ydl.sort_formats(info)
+  selected=list(ydl.build_format_selector(expr)({'formats':info['formats'],'has_merged_format':False,'incomplete_formats':False}))
+  ids=[f['format_id'] for f in selected]
+  assert ids==[wanted],(label,ids,wanted)
+  print(label,'PASS',ids)
