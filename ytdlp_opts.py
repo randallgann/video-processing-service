@@ -63,8 +63,9 @@ def extract_with_bot_check_retry(ydl_opts, url, proxied, download=True, attempts
 
     A retryable failure spends the provider's own attempts; a provider that uses them all up
     goes on cooldown and the chain moves to the next one. A non-retryable failure raises at
-    once. When every provider is cooling down or full, the first is tried once anyway, never
-    silently unproxied. Without a proxy the IP never changes, so retrying is pointless and
+    once. A cooldown only orders and skips providers: when every provider is cooling down or
+    full, the first is still tried with its full attempts (never silently unproxied), so a
+    single-provider chain keeps today's retry budget. Without a proxy the IP never changes, so retrying is pointless and
     we fail fast.
 
     attempts, when given, caps the TOTAL attempts across the chain for this call (the
@@ -130,8 +131,8 @@ def extract_with_bot_check_retry(ydl_opts, url, proxied, download=True, attempts
 
     if not tried:
         first = chain.providers[0]
-        print(f"Every proxy provider is cooling down or full; trying {first.name} once anyway")
-        result = run(first, 1, chain.acquire(first, force=True))
+        print(f"Every proxy provider is cooling down or full; trying {first.name} anyway")
+        result = run(first, first.attempts, chain.acquire(first, force=True))
         if result is not None:
             return result
     raise last_error

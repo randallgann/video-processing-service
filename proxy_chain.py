@@ -9,6 +9,7 @@ provider's concurrent use.
 Cooldowns and in-use slots live in one JSON file under $TMPDIR, guarded by flock, because
 the audio download runs in a child process (yt-dlp-aduio-processor-v1.py): state kept in
 memory would die with the child and the parent would never learn the provider was flagged.
+A cooldown only orders and skips providers; it never shrinks the last one's attempts.
 
 Config comes from YTDLP_PROXY_CHAIN (JSON list, from the k8s Secret). Without it the chain
 is one webshare provider built from YTDLP_PROXY, which is today's behaviour. Provider URLs

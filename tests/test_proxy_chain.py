@@ -195,15 +195,45 @@ def test_a_captions_429_does_not_cool_the_only_webshare_provider(monkeypatch, tm
 
 
 # all cooling down, non-retryable, success clears
-def test_when_every_provider_is_cooling_the_first_is_tried_once_anyway(monkeypatch):
+def test_when_every_provider_is_cooling_the_first_is_tried_with_its_full_budget(monkeypatch):
+    """R8: cooldown only orders/skips; the last resort keeps the provider's attempts."""
     phone, home = StaticProvider('phone', PHONE, attempts=3), StaticProvider('home', HOME)
     chain = use_chain(monkeypatch, phone, home)
     chain.cool_down(phone)
     chain.cool_down(home)
-    seen = fake_ydl(monkeypatch, lambda p: None)
+    failures = [2]
+
+    def flaky(p):
+        if failures[0]:
+            failures[0] -= 1
+            return E429
+        return None
+
+    seen = fake_ydl(monkeypatch, flaky)
     assert extract()[0]['proxy'] == PHONE
-    assert seen == [PHONE]
+    assert seen == [PHONE, PHONE, PHONE], 'all three of phone\'s attempts, never home'
     assert chain.acquire(phone), 'a success clears the cooldown'
+
+
+def test_a_cooled_single_webshare_provider_keeps_todays_download_budget(monkeypatch, tmp_path):
+    """R8 back-compat: YTDLP_PROXY only, provider cooled, a download call still makes 10 attempts."""
+    monkeypatch.setenv('YTDLP_PROXY', POOL)
+    monkeypatch.setenv('YTDLP_PROXY_POOL_SIZE', '10')
+    seen = fake_ydl(monkeypatch, lambda p: E429)
+    with pytest.raises(ytdlp_opts.yt_dlp.utils.DownloadError):
+        ytdlp_opts.extract_with_bot_check_retry({'proxy': POOL}, 'u', proxied=True)
+    assert len(seen) == 10
+    assert state(tmp_path)['webshare']['cooldown_until'] > 0, 'exhausted -> cooling down'
+
+    seen.clear()
+    with pytest.raises(ytdlp_opts.yt_dlp.utils.DownloadError):
+        ytdlp_opts.extract_with_bot_check_retry({'proxy': POOL}, 'u', proxied=True)
+    assert seen == [f'http://user-{n}:pw@p.example:80' for n in range(1, 11)], 'same 10 pinned URLs as before the chain'
+
+    seen.clear()
+    with pytest.raises(ytdlp_opts.yt_dlp.utils.DownloadError):
+        ytdlp_opts.extract_with_bot_check_retry({'proxy': POOL}, 'u', proxied=True, attempts=1)
+    assert len(seen) == 1, 'the captions cap still applies to the last resort'
 
 
 def test_a_non_retryable_failure_raises_at_once_without_cooldown(monkeypatch, tmp_path):
