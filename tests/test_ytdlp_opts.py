@@ -24,6 +24,13 @@ MAIN_AUDIO_OPTS = {
 SUBTITLE_KEYS = ('skip_download', 'writesubtitles', 'writeautomaticsub', 'subtitlesformat', 'subtitleslangs')
 
 
+@pytest.fixture(autouse=True)
+def chain_state(monkeypatch, tmp_path):
+    """Each test gets its own proxy-chain state file; a cooldown must not carry into the next test."""
+    monkeypatch.setenv('TMPDIR', str(tmp_path))
+    monkeypatch.delenv('YTDLP_PROXY_CHAIN', raising=False)
+
+
 @pytest.fixture
 def no_proxy(monkeypatch, tmp_path):
     monkeypatch.delenv('YTDLP_PROXY', raising=False)
@@ -208,3 +215,17 @@ def test_attempts_override_is_floored_at_one_and_unproxied_is_one(monkeypatch, a
     with pytest.raises(ytdlp_opts.yt_dlp.utils.DownloadError):
         ytdlp_opts.extract_with_bot_check_retry({}, 'u', proxied=False, attempts=5)
     assert len(proxies) == 1
+
+
+def test_back_compat_ytdlp_proxy_alone_makes_the_same_attempts_as_before_the_chain(monkeypatch):
+    """Issue #3: no YTDLP_PROXY_CHAIN -> one webshare provider; the URLs are 79143f9's sequence."""
+    proxy = 'http://user-rotate:pw@p.example:80'
+    monkeypatch.setenv('YTDLP_PROXY', proxy)
+    monkeypatch.setenv('YTDLP_PROXY_POOL_SIZE', '3')
+    monkeypatch.setenv('YTDLP_BOT_CHECK_ATTEMPTS', '3')
+    proxies = []
+    _failing_ydl(monkeypatch, proxies)
+    with pytest.raises(ytdlp_opts.yt_dlp.utils.DownloadError):
+        ytdlp_opts.extract_with_bot_check_retry({'proxy': proxy}, 'u', proxied=True)
+    assert proxies == [proxy_for_attempt(proxy, a) for a in (1, 2, 3)] == [
+        'http://user-1:pw@p.example:80', 'http://user-2:pw@p.example:80', 'http://user-3:pw@p.example:80']

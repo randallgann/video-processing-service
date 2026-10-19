@@ -227,7 +227,14 @@ LOG_LEVEL=INFO                   # Logging verbosity
 MAX_VIDEO_DURATION_SECONDS=14400  # Over this, fail (and ack) before downloading
 CAPTIONS_ATTEMPTS=1              # Proxy attempts per caption extraction (download keeps YTDLP_BOT_CHECK_ATTEMPTS)
 CAPTIONS_ENABLED=true            # false/0/no/off: standard goes straight to Whisper
+YTDLP_PROXY_CHAIN=<json>         # Ordered proxy providers (Secret youtube-proxy, key proxy-chain); shape in platform docs/milestones/PROXY_CHAIN_PLAN.md
+YTDLP_PROXY_COOLDOWN_SECONDS=300 # A provider that uses up its attempts on 403/429/bot checks is skipped this long
+YTDLP_PROXY_SLOT_TTL_SECONDS=1800 # A provider slot older than this (or held by a dead pid) is reclaimed
 ```
+
+`YTDLP_PROXY` alone still works: without `YTDLP_PROXY_CHAIN` it becomes a one-provider chain
+(`webshare`, `YTDLP_BOT_CHECK_ATTEMPTS` attempts, no concurrency cap). Chain state (cooldowns, slots)
+is shared by the processor and the download subprocess through `$TMPDIR/proxy-chain-state.json`.
 
 ### Request / completion contract (T2)
 - Request `quality`: `standard` (default when absent) tries the YouTube caption track
