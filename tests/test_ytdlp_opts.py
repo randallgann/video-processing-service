@@ -7,9 +7,10 @@ import ytdlp_opts
 from ytdlp_opts import build_ydl_opts, proxy_for_attempt
 
 # The option dict yt-dlp-aduio-processor-v1.py built inline on main @ 53380e8, minus
-# proxy/cookie keys. The audio path must keep sending exactly this.
+# proxy/cookie keys, with the issue #18 default 64 kbps cap on the format and the re-encode.
+# The audio path must keep sending exactly this.
 MAIN_AUDIO_OPTS = {
-    'format': 'bestaudio/best',
+    'format': 'bestaudio[abr<=64]/worstaudio/bestaudio/best',
     'restrictfilenames': True,
     'quiet': False,
     'no_warnings': False,
@@ -19,7 +20,7 @@ MAIN_AUDIO_OPTS = {
     'socket_timeout': 60,
     'retries': 10,
     'fragment_retries': 10,
-    'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}],
+    'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '64'}],
 }
 SUBTITLE_KEYS = ('skip_download', 'writesubtitles', 'writeautomaticsub', 'subtitlesformat', 'subtitleslangs')
 
@@ -29,6 +30,7 @@ def chain_state(monkeypatch, tmp_path):
     """Each test gets its own proxy-chain state file; a cooldown must not carry into the next test."""
     monkeypatch.setenv('TMPDIR', str(tmp_path))
     monkeypatch.delenv('YTDLP_PROXY_CHAIN', raising=False)
+    monkeypatch.delenv('YTDLP_MAX_ABR', raising=False)
 
 
 @pytest.fixture
@@ -67,6 +69,50 @@ def test_audio_matches_main(no_proxy, tmp_path):
     assert opts == dict(MAIN_AUDIO_OPTS, paths={'home': work},
                         outtmpl={'default': os.path.join(work, '%(title)s.%(ext)s')})
     assert not any(key in opts for key in SUBTITLE_KEYS)
+
+
+# Issue #18: the proxy bills per GB of audio download, so the stream is capped by bitrate.
+def audio_format_and_quality(work):
+    opts = build_ydl_opts(work, audio=True)
+    [postprocessor] = opts['postprocessors']
+    assert postprocessor['key'] == 'FFmpegExtractAudio' and postprocessor['preferredcodec'] == 'mp3'
+    return opts['format'], postprocessor['preferredquality']
+
+
+@pytest.mark.parametrize('value', [None, '', '  '])
+def test_audio_bitrate_cap_defaults_to_64(no_proxy, tmp_path, monkeypatch, value):
+    if value is not None:
+        monkeypatch.setenv('YTDLP_MAX_ABR', value)
+    assert audio_format_and_quality(str(tmp_path)) == ('bestaudio[abr<=64]/worstaudio/bestaudio/best', '64')
+
+
+def test_audio_bitrate_cap_from_env(no_proxy, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv('YTDLP_MAX_ABR', '96')
+    assert audio_format_and_quality(str(tmp_path)) == ('bestaudio[abr<=96]/worstaudio/bestaudio/best', '96')
+    assert 'Audio bitrate cap: 96 kbps' in capsys.readouterr().out
+
+
+def test_audio_bitrate_cap_zero_restores_the_uncapped_options(no_proxy, tmp_path, monkeypatch):
+    monkeypatch.setenv('YTDLP_MAX_ABR', '0')
+    work = str(tmp_path)
+    uncapped = dict(MAIN_AUDIO_OPTS, format='bestaudio/best',
+                    postprocessors=[{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}])
+    assert build_ydl_opts(work, audio=True) == dict(uncapped, paths={'home': work},
+                                                    outtmpl={'default': os.path.join(work, '%(title)s.%(ext)s')})
+
+
+@pytest.mark.parametrize('value', ['abc', '-5', '64k', '1.5'])
+def test_audio_bitrate_cap_bad_value_falls_back_to_64_with_one_warning(no_proxy, tmp_path, monkeypatch, capsys, value):
+    monkeypatch.setenv('YTDLP_MAX_ABR', value)
+    assert audio_format_and_quality(str(tmp_path)) == ('bestaudio[abr<=64]/worstaudio/bestaudio/best', '64')
+    warnings = [line for line in capsys.readouterr().out.splitlines() if 'YTDLP_MAX_ABR' in line]
+    assert len(warnings) == 1 and warnings[0].startswith('WARNING:') and repr(value) in warnings[0]
+
+
+def test_audio_bitrate_cap_leaves_captions_and_probe_alone(no_proxy, tmp_path, monkeypatch):
+    monkeypatch.setenv('YTDLP_MAX_ABR', '96')
+    for opts in (build_ydl_opts(str(tmp_path), audio=False), ytdlp_opts.build_probe_opts(str(tmp_path))):
+        assert 'format' not in opts and 'postprocessors' not in opts
 
 
 def test_captions_options(no_proxy, tmp_path):

@@ -206,6 +206,30 @@ def extract_with_bot_check_retry(ydl_opts, url, proxied, download=True, attempts
         time.sleep(max(0.0, min(poll, deadline - time.monotonic())))
 
 
+DEFAULT_MAX_ABR_KBPS = 64
+
+
+def max_abr_kbps():
+    """
+    The audio bitrate cap in kbps, from YTDLP_MAX_ABR (issue #18). The proxy bills per GB of
+    download, and Whisper resamples to 16 kHz mono, so a low-bitrate stream loses nothing it uses.
+    Unset or empty -> 64; 0 -> no cap (the pre-#18 options); anything else that is not a
+    non-negative integer -> 64 with a warning, so a typo never stops a worker.
+    """
+    raw = os.environ.get('YTDLP_MAX_ABR', '').strip()
+    if not raw:
+        return DEFAULT_MAX_ABR_KBPS
+    try:
+        value = int(raw)
+    except ValueError:
+        value = -1
+    if value < 0:
+        print(f"WARNING: YTDLP_MAX_ABR={raw!r} is not a non-negative integer; "
+              f"capping audio at {DEFAULT_MAX_ABR_KBPS} kbps")
+        return DEFAULT_MAX_ABR_KBPS
+    return value
+
+
 def build_ydl_opts(download_path, *, audio, lang='en'):
     """
     yt-dlp options for one job.
@@ -240,11 +264,21 @@ def build_ydl_opts(download_path, *, audio, lang='en'):
         'fragment_retries': 10,
     }
     if audio:
-        ydl_opts['format'] = 'bestaudio/best'  # Download best quality
+        cap = max_abr_kbps()
+        if cap:
+            # The best audio-only stream at or under the cap; else the smallest audio-only one
+            # (still the fewest bytes); then any audio; then muxed. Strict [abr<=N]: a stream with
+            # an unknown bitrate cannot pass as under the cap, but the later alternatives still reach it.
+            ydl_opts['format'] = f'bestaudio[abr<={cap}]/worstaudio/bestaudio/best'
+            print(f"Audio bitrate cap: {cap} kbps")
+        else:
+            ydl_opts['format'] = 'bestaudio/best'  # YTDLP_MAX_ABR=0: no cap
+            print("Audio bitrate cap: none")
         ydl_opts['postprocessors'] = [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
-            'preferredquality': '192'
+            # The re-encode follows the cap, so the upload to GCS/Replicate shrinks too
+            'preferredquality': str(cap) if cap else '192'
         }]
     else:
         ydl_opts.update({
