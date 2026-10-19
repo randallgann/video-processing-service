@@ -11,20 +11,56 @@ the audio download runs in a child process (yt-dlp-aduio-processor-v1.py): state
 memory would die with the child and the parent would never learn the provider was flagged.
 A cooldown only orders and skips providers; it never shrinks the last one's attempts.
 
+The concurrency cap is never bypassed (R9): when every provider is at its cap the caller
+waits for a slot (YTDLP_PROXY_CAPACITY_WAIT_SECONDS) and then fails with ProxyCapacityError,
+which the processor treats as retryable (the job is redelivered).
+
 Config comes from YTDLP_PROXY_CHAIN (JSON list, from the k8s Secret). Without it the chain
 is one webshare provider built from YTDLP_PROXY, which is today's behaviour. Provider URLs
-carry credentials: only provider names are ever logged or put in an error message.
+carry credentials: only provider names are logged or put in our own messages, and redact()
+strips credentials from any other text (yt-dlp errors and output) before it is shown (R10).
 """
 import fcntl
 import json
 import os
+import re
 import tempfile
 import time
+import urllib.parse
 import uuid
 
 STATE_FILE = 'proxy-chain-state.json'
 DEFAULT_COOLDOWN_SECONDS = 300
 DEFAULT_SLOT_TTL_SECONDS = 1800
+DEFAULT_CAPACITY_WAIT_SECONDS = 60
+DEFAULT_CAPACITY_POLL_SECONDS = 2
+
+# scheme://userinfo@ -> scheme://***@ (userinfo cannot contain '/', '@' or whitespace).
+_USERINFO = re.compile(r'(?i)\b([a-z][a-z0-9+.\-]*://)[^\s/@]+@')
+
+
+def url_secrets(url):
+    """The credential fragments of a proxy URL that could appear on their own in some text."""
+    parsed = urllib.parse.urlparse(url or '')
+    found = []
+    for part in (parsed.username, parsed.password):
+        if part:
+            found += [part, urllib.parse.unquote(part)]
+    if parsed.username and parsed.username.endswith('-rotate'):
+        found.append(parsed.username[:-len('rotate')])  # the stem of every pinned `<user>-<n>`
+    return found
+
+
+def redact(text, secrets=()):
+    """Text with every URL's userinfo replaced by *** and any known credential fragment removed."""
+    text = _USERINFO.sub(r'\1***@', str(text))
+    for secret in sorted({s for s in secrets if s and len(s) >= 4}, key=len, reverse=True):
+        text = text.replace(secret, '***')
+    return text
+
+
+class ProxyCapacityError(RuntimeError):
+    """Every provider stayed at its concurrency cap for the whole wait. Retryable: redeliver the job."""
 
 
 class ProxyProvider:
@@ -132,6 +168,15 @@ class ProxyChain:
     def __len__(self):
         return len(self.providers)
 
+    def secrets(self):
+        found = []
+        for provider in self.providers:
+            found += url_secrets(provider.url)
+            rotate_url = getattr(provider, 'rotate_url', None)
+            if rotate_url:
+                found += [rotate_url] + url_secrets(rotate_url)
+        return found
+
     @classmethod
     def from_env(cls, default_url=None):
         """
@@ -191,18 +236,18 @@ class ProxyChain:
         ]
         return entry
 
-    def acquire(self, provider, force=False):
+    def acquire(self, provider, ignore_cooldown=False):
         """
         A slot id for one call on this provider, or None while it cools down or is at
-        max_concurrent. force=True takes a slot regardless (the chain's last resort).
+        max_concurrent. ignore_cooldown=True (the chain's last resort) skips only the cooldown
+        check: the cap always holds.
         """
         def change(state):
             entry = self._entry(state, provider)
-            if not force:
-                if entry.get('cooldown_until', 0) > time.time():
-                    return None
-                if provider.max_concurrent and len(entry['slots']) >= provider.max_concurrent:
-                    return None
+            if not ignore_cooldown and entry.get('cooldown_until', 0) > time.time():
+                return None
+            if provider.max_concurrent and len(entry['slots']) >= provider.max_concurrent:
+                return None
             slot = uuid.uuid4().hex
             entry['slots'].append({'id': slot, 'pid': os.getpid(), 'acquired_at': time.time()})
             return slot
@@ -210,6 +255,10 @@ class ProxyChain:
         try:
             return self._update(change)
         except OSError as e:
+            if provider.max_concurrent:
+                # Without the state its cap cannot be checked, and the cap is never bypassed.
+                print(f"WARNING: proxy chain state unavailable ({type(e).__name__}); not using capped {provider.name}")
+                return None
             print(f"WARNING: proxy chain state unavailable ({type(e).__name__}); using {provider.name} without it")
             return 'untracked'
 

@@ -230,11 +230,15 @@ CAPTIONS_ENABLED=true            # false/0/no/off: standard goes straight to Whi
 YTDLP_PROXY_CHAIN=<json>         # Ordered proxy providers (Secret youtube-proxy, key proxy-chain); shape in platform docs/milestones/PROXY_CHAIN_PLAN.md
 YTDLP_PROXY_COOLDOWN_SECONDS=300 # A provider that uses up its attempts on 403/429/bot checks is skipped this long
 YTDLP_PROXY_SLOT_TTL_SECONDS=1800 # A provider slot older than this (or held by a dead pid) is reclaimed
+YTDLP_PROXY_CAPACITY_WAIT_SECONDS=60 # Every provider at its max_concurrent: wait this long for a slot, then fail retryably (redelivery)
+YTDLP_PROXY_CAPACITY_POLL_SECONDS=2  # How often that wait re-checks for a free slot
 ```
 
 `YTDLP_PROXY` alone still works: without `YTDLP_PROXY_CHAIN` it becomes a one-provider chain
 (`webshare`, `YTDLP_BOT_CHECK_ATTEMPTS` attempts, no concurrency cap). Chain state (cooldowns, slots)
 is shared by the processor and the download subprocess through `$TMPDIR/proxy-chain-state.json`.
+A cooldown only orders and skips providers; a provider's concurrency cap is never exceeded. Proxy
+credentials are redacted from everything the chain prints or raises, including yt-dlp's own output.
 
 ### Request / completion contract (T2)
 - Request `quality`: `standard` (default when absent) tries the YouTube caption track

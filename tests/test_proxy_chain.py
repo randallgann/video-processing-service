@@ -355,3 +355,229 @@ def test_the_chain_is_used_end_to_end_from_the_env(monkeypatch):
     opts = ytdlp_opts.build_ydl_opts('/nonexistent', audio=False)
     info, _ = ytdlp_opts.extract_with_bot_check_retry(opts, 'u', proxied=bool(opts.get('proxy')))
     assert seen == [PHONE, 'http://user-1:pw@p.example:80']
+
+
+# R9: the concurrency cap is never bypassed
+CAP_ENV = {'YTDLP_PROXY_CAPACITY_WAIT_SECONDS': '10', 'YTDLP_PROXY_CAPACITY_POLL_SECONDS': '2'}
+
+
+def fake_clock(monkeypatch, on_sleep=None):
+    """time.monotonic advanced only by time.sleep; on_sleep(n) runs on the n-th sleep."""
+    now = [100.0]
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+        if on_sleep:
+            on_sleep(len(sleeps))
+
+    monkeypatch.setattr(ytdlp_opts.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(ytdlp_opts.time, 'sleep', sleep)
+    return sleeps
+
+
+def capped_ydl(monkeypatch, chain, provider):
+    """Like fake_ydl, but fails the test if a YoutubeDL is built while the provider is over its cap."""
+    built = []
+
+    class FakeYDL:
+        def __init__(self, opts):
+            with open(chain.state_path) as f:
+                slots = json.load(f)['providers'][provider.name]['slots']
+            assert len(slots) <= provider.max_concurrent, 'provider concurrency cap exceeded'
+            built.append(opts['proxy'])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def extract_info(self, url, download):
+            return {'id': 'x'}
+
+        def prepare_filename(self, info):
+            return 'x'
+
+    monkeypatch.setattr(ytdlp_opts.yt_dlp, 'YoutubeDL', FakeYDL)
+    return built
+
+
+def test_a_full_provider_is_never_used_past_its_cap_and_the_wait_is_bounded(monkeypatch, tmp_path, processor):
+    for key, value in CAP_ENV.items():
+        monkeypatch.setenv(key, value)
+    phone = StaticProvider('phone', PHONE, max_concurrent=1)
+    chain = use_chain(monkeypatch, phone)
+    built = capped_ydl(monkeypatch, chain, phone)
+    sleeps = fake_clock(monkeypatch)
+    held = chain.acquire(phone)
+
+    with pytest.raises(proxy_chain.ProxyCapacityError) as raised:
+        extract()
+
+    assert built == [], 'no YoutubeDL while the only slot is held'
+    assert [s['id'] for s in state(tmp_path)['phone']['slots']] == [held], 'no second slot was ever taken'
+    assert sum(sleeps) == 10 and all(s <= 2 for s in sleeps)
+    assert str(raised.value) == 'No proxy slot free within 10s: every provider is at its concurrency cap (phone)'
+    assert processor.classify_failure(str(raised.value)) == 'retry', 'the job is redelivered, not failed'
+
+
+def test_a_slot_released_during_the_wait_is_taken(monkeypatch, tmp_path):
+    for key, value in CAP_ENV.items():
+        monkeypatch.setenv(key, value)
+    phone = StaticProvider('phone', PHONE, max_concurrent=1)
+    chain = use_chain(monkeypatch, phone)
+    built = capped_ydl(monkeypatch, chain, phone)
+    held = chain.acquire(phone)
+    sleeps = fake_clock(monkeypatch, on_sleep=lambda n: n == 2 and chain.release(phone, held))
+
+    info, _ = extract()
+
+    assert info == {'id': 'x'} and built == [PHONE]
+    assert len(sleeps) == 2
+    assert state(tmp_path)['phone']['slots'] == []
+
+
+def test_the_last_resort_takes_a_cooling_provider_with_room_before_waiting(monkeypatch):
+    phone, home = StaticProvider('phone', PHONE, max_concurrent=1), StaticProvider('home', HOME, attempts=2)
+    chain = use_chain(monkeypatch, phone, home)
+    chain.acquire(phone)
+    chain.cool_down(home)
+    sleeps = fake_clock(monkeypatch)
+    seen = fake_ydl(monkeypatch, lambda p: None)
+    assert extract()[0]['proxy'] == HOME
+    assert seen == [HOME] and sleeps == []
+
+
+def test_without_state_a_capped_provider_is_not_used(tmp_path):
+    missing = str(tmp_path / 'no-such-dir' / proxy_chain.STATE_FILE)
+    capped = ProxyChain([StaticProvider('phone', PHONE, max_concurrent=1)], state_path=missing)
+    uncapped = ProxyChain([StaticProvider('home', HOME)], state_path=missing)
+    assert capped.acquire(capped.providers[0]) is None
+    assert uncapped.acquire(uncapped.providers[0]) == 'untracked'
+
+
+# R10: proxy credentials never appear in what is printed or raised
+SECRET_URL = 'http://synthetic-user:synthetic-pass@phone.example:8080'
+SECRET_POOL = 'http://synthetic-user-rotate:synthetic-pass@p.example:80'
+SECRETS = ('synthetic-user', 'synthetic-pass')
+
+
+def assert_unchained(error):
+    """No traceback can print the original (credential-bearing) exception."""
+    assert error.__cause__ is None
+    assert error.__context__ is None or error.__suppress_context__
+
+
+def assert_clean(*texts):
+    for text in texts:
+        for secret in SECRETS:
+            assert secret not in text
+
+
+def test_a_retry_diagnostic_quoting_the_proxy_url_is_redacted(monkeypatch, capsys):
+    """The reviewer's repro: a retryable 429 whose text carries the authenticated proxy URL."""
+    use_chain(monkeypatch, StaticProvider('phone', SECRET_URL, attempts=2))
+    fake_ydl(monkeypatch, lambda p: 'HTTP Error 429 via ' + p)
+    with pytest.raises(ytdlp_opts.yt_dlp.utils.DownloadError) as raised:
+        extract()
+    out, err = capsys.readouterr()
+    assert 'http://***@phone.example:8080' in out
+    assert_clean(out, err, str(raised.value), repr(raised.value))
+    assert_unchained(raised.value)
+
+
+@pytest.mark.parametrize('failure', [
+    PRIVATE + ' (proxy ' + SECRET_URL + ')',                        # non-retryable
+    E429 + ' user synthetic-user, password synthetic-pass',          # bare fragments
+])
+def test_raised_errors_are_redacted(monkeypatch, failure):
+    use_chain(monkeypatch, StaticProvider('phone', SECRET_URL))
+    fake_ydl(monkeypatch, lambda p: failure)
+    with pytest.raises(ytdlp_opts.yt_dlp.utils.DownloadError) as raised:
+        extract()
+    assert_clean(str(raised.value))
+
+
+def test_a_pinned_webshare_url_in_an_error_is_redacted(monkeypatch, capsys):
+    use_chain(monkeypatch, WebshareProvider('pool', SECRET_POOL, attempts=2, pool_size=3))
+    fake_ydl(monkeypatch, lambda p: f'HTTP Error 403 Forbidden via {p} for synthetic-user-2')
+    with pytest.raises(ytdlp_opts.yt_dlp.utils.DownloadError) as raised:
+        extract()
+    out, err = capsys.readouterr()
+    assert_clean(out, err, str(raised.value))
+
+
+def test_other_exceptions_carrying_credentials_are_redacted(monkeypatch):
+    use_chain(monkeypatch, StaticProvider('phone', SECRET_URL))
+
+    class Boom:
+        def __init__(self, opts):
+            raise OSError(f"Unable to connect to proxy {opts['proxy']}")
+
+    monkeypatch.setattr(ytdlp_opts.yt_dlp, 'YoutubeDL', Boom)
+    with pytest.raises(RuntimeError) as raised:
+        extract()
+    assert str(raised.value) == 'Unable to connect to proxy http://***@phone.example:8080'
+    assert_unchained(raised.value)
+
+
+def test_yt_dlp_own_output_goes_through_the_redacting_logger(monkeypatch, capsys):
+    """yt-dlp prints its ERROR:/WARNING: lines itself; the processor logs the child's stderr."""
+    use_chain(monkeypatch, StaticProvider('phone', SECRET_URL))
+
+    class TalkativeYDL:
+        def __init__(self, opts):
+            self.log = opts['logger']
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def extract_info(self, url, download):
+            self.log.debug(f'[youtube] x: Downloading webpage via {SECRET_URL}')
+            self.log.warning('proxy synthetic-user is slow')
+            self.log.error(f'ERROR: [youtube] x: HTTP Error 429: Too Many Requests ({SECRET_URL})')
+            raise ytdlp_opts.yt_dlp.utils.DownloadError('ERROR: [youtube] x: HTTP Error 429: Too Many Requests')
+
+        def prepare_filename(self, info):
+            return 'x'
+
+    monkeypatch.setattr(ytdlp_opts.yt_dlp, 'YoutubeDL', TalkativeYDL)
+    with pytest.raises(ytdlp_opts.yt_dlp.utils.DownloadError):
+        extract()
+    out, err = capsys.readouterr()
+    assert_clean(out, err)
+    assert '[youtube] x: Downloading webpage via http://***@phone.example:8080' in out
+    assert 'WARNING: proxy *** is slow' in err
+    assert err.splitlines()[-1].startswith('ERROR: [youtube] x: HTTP Error 429'), 'the processor still finds ERROR:'
+
+
+def test_the_redacting_logger_matches_the_real_yt_dlp_interface(capsys):
+    """Offline: a real YoutubeDL routes to_screen, warnings and errors to our logger."""
+    real = ytdlp_opts.yt_dlp
+    if not isinstance(real.YoutubeDL, type) or real.YoutubeDL is object:
+        pytest.skip('yt-dlp not installed')
+    secrets = proxy_chain.url_secrets(SECRET_URL)
+    with real.YoutubeDL({'logger': ytdlp_opts._RedactingLogger(secrets), 'quiet': False}) as ydl:
+        ydl.to_screen(f'[info] via {SECRET_URL}')
+        ydl.report_warning(f'slow proxy {SECRET_URL}')
+        with pytest.raises(real.utils.DownloadError) as raised:
+            ydl.report_error(f'boom via {SECRET_URL}')
+    out, err = capsys.readouterr()
+    assert '[info] via http://***@phone.example:8080' in out
+    assert 'WARNING: slow proxy http://***@phone.example:8080' in err
+    assert 'ERROR: boom via http://***@phone.example:8080' in err
+    assert_clean(out, err)
+    assert 'synthetic-pass' in str(raised.value), 'yt-dlp itself raises the raw text; extract_with_bot_check_retry cleans it'
+
+
+def test_the_state_file_never_holds_a_credential(monkeypatch, tmp_path):
+    chain = use_chain(monkeypatch, StaticProvider('phone', SECRET_URL), WebshareProvider('pool', SECRET_POOL))
+    fake_ydl(monkeypatch, lambda p: E429 if 'phone' in p else None)
+    extract()
+    chain.acquire(chain.providers[1])
+    assert_clean((tmp_path / proxy_chain.STATE_FILE).read_text())

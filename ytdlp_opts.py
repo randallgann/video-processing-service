@@ -8,12 +8,14 @@ import os
 import random
 import re
 import shutil
+import sys
 import time
 import urllib.parse
 
 import yt_dlp
 
-from proxy_chain import ProxyChain
+from proxy_chain import (DEFAULT_CAPACITY_POLL_SECONDS, DEFAULT_CAPACITY_WAIT_SECONDS, ProxyCapacityError,
+                         ProxyChain, redact)
 
 # Failures that depend on which proxy exit IP we got, so a different IP can succeed:
 # YouTube's bot check, a media URL rejected for the requesting IP, and rate limiting.
@@ -48,6 +50,29 @@ def proxy_for_attempt(proxy, attempt, pool_size=None):
 PROXY_START = random.randrange(1000)
 
 
+class _RedactingLogger:
+    """
+    yt-dlp's own output with proxy credentials removed (R10): an error can quote the proxy
+    URL, and the processor logs the download child's stderr. Same streams and prefixes as
+    yt-dlp without a logger, so the processor still finds the child's ERROR: lines.
+    """
+
+    def __init__(self, secrets):
+        self.secrets = secrets
+
+    def debug(self, message):
+        print(redact(message, self.secrets))
+
+    def info(self, message):
+        print(redact(message, self.secrets))
+
+    def warning(self, message):
+        print(f"WARNING: {redact(message, self.secrets)}", file=sys.stderr)
+
+    def error(self, message):
+        print(redact(message, self.secrets), file=sys.stderr)
+
+
 def extract_with_bot_check_retry(ydl_opts, url, proxied, download=True, attempts=None):
     """
     Download with yt-dlp, retrying failures that depend on the proxy exit IP.
@@ -63,14 +88,19 @@ def extract_with_bot_check_retry(ydl_opts, url, proxied, download=True, attempts
 
     A retryable failure spends the provider's own attempts; a provider that uses them all up
     goes on cooldown and the chain moves to the next one. A non-retryable failure raises at
-    once. A cooldown only orders and skips providers: when every provider is cooling down or
-    full, the first is still tried with its full attempts (never silently unproxied), so a
-    single-provider chain keeps today's retry budget. Without a proxy the IP never changes, so retrying is pointless and
-    we fail fast.
+    once. A cooldown only orders and skips providers (R8): when none is free, the first one
+    with a free slot runs with its full attempts even while cooling down, so a single-provider
+    chain keeps today's retry budget. The concurrency cap is never bypassed (R9): when every
+    provider is at its cap, wait up to YTDLP_PROXY_CAPACITY_WAIT_SECONDS for a slot, then raise
+    ProxyCapacityError (retryable). Without a proxy the IP never changes, so retrying is
+    pointless and we fail fast.
 
     attempts, when given, caps the TOTAL attempts across the chain for this call (the
     captions path passes CAPTIONS_ATTEMPTS, default 1); ending on that cap cools nothing.
     Unproxied calls still make one attempt.
+
+    Errors raised and everything printed, including yt-dlp's own output, have proxy
+    credentials redacted (R10).
     """
     chain = ProxyChain.from_env(default_url=ydl_opts.get('proxy')) if proxied else ProxyChain([])
     if not len(chain):
@@ -78,9 +108,20 @@ def extract_with_bot_check_retry(ydl_opts, url, proxied, download=True, attempts
             info = ydl.extract_info(url, download=download)
             return info, ydl.prepare_filename(info)
 
+    secrets = chain.secrets()
     cap = max(1, attempts) if attempts is not None else None
     made = 0
     last_error = None
+
+    def clean(error):
+        """The error without proxy credentials: the same object when it carries none."""
+        text = str(error)
+        redacted = redact(text, secrets)
+        if redacted == text:
+            return error
+        if isinstance(error, yt_dlp.utils.DownloadError):
+            return yt_dlp.utils.DownloadError(redacted)
+        return RuntimeError(redacted)
 
     def run(provider, per_provider, slot):
         nonlocal made, last_error
@@ -89,25 +130,32 @@ def extract_with_bot_check_retry(ydl_opts, url, proxied, download=True, attempts
                 made += 1
                 opts = dict(ydl_opts)
                 opts['proxy'] = provider.url_for(attempt)
+                opts['logger'] = _RedactingLogger(secrets)
                 try:
                     with yt_dlp.YoutubeDL(opts) as ydl:
                         info = ydl.extract_info(url, download=download)
                         result = info, ydl.prepare_filename(info)
                 except yt_dlp.utils.DownloadError as e:
-                    message = str(e).replace("'", "’")
+                    error = clean(e)
+                    message = str(error).replace("'", "’")
                     if not any(marker in message for marker in RETRYABLE_MARKERS):
                         provider.report('error')
-                        raise
+                        raise error from None
                     provider.report('bot_check' if RETRYABLE_MARKERS[0] in message else 'throttled')
-                    last_error = e
+                    last_error = error
                     if cap is not None and made >= cap:
-                        raise
+                        raise error from None
                     if attempt == per_provider:
                         chain.cool_down(provider)
                         return None
                     print(f"Proxy-dependent failure via {provider.name} on attempt {attempt}/{per_provider} "
                           f"({message[:80]}); retrying on another proxy")
                     time.sleep(min(2 * attempt, 10))
+                except Exception as e:
+                    error = clean(e)
+                    if error is e:
+                        raise
+                    raise error from None
                 else:
                     provider.report('ok')
                     chain.clear_cooldown(provider)
@@ -128,14 +176,34 @@ def extract_with_bot_check_retry(ydl_opts, url, proxied, download=True, attempts
             return result
         if len(chain) > 1:
             print(f"Proxy provider {provider.name} exhausted; trying the next one")
+    if tried:
+        raise last_error
 
-    if not tried:
-        first = chain.providers[0]
-        print(f"Every proxy provider is cooling down or full; trying {first.name} anyway")
-        result = run(first, first.attempts, chain.acquire(first, force=True))
-        if result is not None:
-            return result
-    raise last_error
+    # Last resort: none was free. Any provider with a free slot, cooling down or not (R8);
+    # when every one is at its cap, wait for a slot, then give up retryably (R9).
+    wait = float(os.environ.get('YTDLP_PROXY_CAPACITY_WAIT_SECONDS', DEFAULT_CAPACITY_WAIT_SECONDS))
+    poll = float(os.environ.get('YTDLP_PROXY_CAPACITY_POLL_SECONDS', DEFAULT_CAPACITY_POLL_SECONDS))
+    deadline = time.monotonic() + wait
+    waiting = False
+    while True:
+        for ignore_cooldown in (False, True):
+            for provider in chain.providers:
+                slot = chain.acquire(provider, ignore_cooldown=ignore_cooldown)
+                if slot is None:
+                    continue
+                print(f"No proxy provider was free; trying {provider.name}")
+                result = run(provider, provider.attempts, slot)
+                if result is not None:
+                    return result
+                raise last_error
+        if time.monotonic() >= deadline:
+            raise ProxyCapacityError(
+                f"No proxy slot free within {wait:g}s: every provider is at its concurrency cap "
+                f"({', '.join(p.name for p in chain.providers)})")
+        if not waiting:
+            print(f"Every proxy provider is at its concurrency cap; waiting up to {wait:g}s for a slot")
+            waiting = True
+        time.sleep(max(0.0, min(poll, deadline - time.monotonic())))
 
 
 def build_ydl_opts(download_path, *, audio, lang='en'):
