@@ -1,0 +1,28 @@
+..F                                                                      [100%]
+=================================== FAILURES ===================================
+___________ test_short_credentials_are_redacted_from_error_and_logs ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10fcef130>
+tmp_path = PosixPath('/private/var/folders/4z/jrwb_ky56p7gvg8b_tzqwd3c0000gn/T/pytest-of-rgann/pytest-130/test_short_credentials_are_red0')
+capsys = <_pytest.capture.CaptureFixture object at 0x10fceefe0>
+
+    def test_short_credentials_are_redacted_from_error_and_logs(monkeypatch,tmp_path,capsys):
+        p=StaticProvider('phone','http://abc:xyz@phone.example:8080',attempts=2)
+        install(monkeypatch,tmp_path,p,'HTTP Error 429 username abc password xyz')
+        with pytest.raises(ytdlp_opts.yt_dlp.utils.DownloadError) as caught:
+            ytdlp_opts.extract_with_bot_check_retry({'proxy':p.url},'u',proxied=True)
+        output=capsys.readouterr()
+        for text in (output.out,output.err,str(caught.value)):
+>           assert 'abc' not in text and 'xyz' not in text, 'short configured credential leaked'
+E           AssertionError: short configured credential leaked
+E           assert ('abc' not in 'Proxy-depen...n for 300s\n'
+E             
+E             'abc' is contained here:
+E                username abc password xyz); retrying on another proxy
+E             ?           +++
+E               Proxy provider phone cooling down for 300s)
+
+tests/test_reviewer_proxy_guards.py:56: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_reviewer_proxy_guards.py::test_short_credentials_are_redacted_from_error_and_logs
+1 failed, 2 passed in 0.04s

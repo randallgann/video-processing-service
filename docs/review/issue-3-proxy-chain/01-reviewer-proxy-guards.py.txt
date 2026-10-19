@@ -1,0 +1,42 @@
+import json
+import pytest
+import proxy_chain
+import ytdlp_opts
+from proxy_chain import ProxyChain, StaticProvider
+
+
+def install(monkeypatch,tmp_path,provider,fail):
+    monkeypatch.setenv('TMPDIR',str(tmp_path))
+    chain=ProxyChain([provider])
+    monkeypatch.setattr(ytdlp_opts.ProxyChain,'from_env',classmethod(lambda cls,default_url=None:chain))
+    monkeypatch.setattr(ytdlp_opts.time,'sleep',lambda s:None)
+    class YDL:
+        def __init__(self,opts):
+            with open(chain.state_path) as f: slots=json.load(f)['providers'][provider.name]['slots']
+            if provider.max_concurrent: assert len(slots)<=provider.max_concurrent,'provider concurrency cap exceeded'
+        def __enter__(self):return self
+        def __exit__(self,*args):return False
+        def extract_info(self,*args,**kwargs):
+            if fail:raise ytdlp_opts.yt_dlp.utils.DownloadError(fail)
+            return {'id':'x'}
+        def prepare_filename(self,info):return 'x'
+    monkeypatch.setattr(ytdlp_opts.yt_dlp,'YoutubeDL',YDL)
+    return chain
+
+
+def test_full_provider_cap_is_not_bypassed(monkeypatch,tmp_path):
+    p=StaticProvider('phone','http://phone.example:8080',max_concurrent=1)
+    chain=install(monkeypatch,tmp_path,p,None)
+    held=chain.acquire(p)
+    try:
+        ytdlp_opts.extract_with_bot_check_retry({'proxy':p.url},'u',proxied=True)
+    finally:chain.release(p,held)
+
+
+def test_retry_diagnostic_never_emits_proxy_credentials(monkeypatch,tmp_path,capsys):
+    p=StaticProvider('phone','http://synthetic-user:synthetic-pass@phone.example:8080',attempts=2)
+    install(monkeypatch,tmp_path,p,'HTTP Error 429 via '+p.url)
+    with pytest.raises(ytdlp_opts.yt_dlp.utils.DownloadError):
+        ytdlp_opts.extract_with_bot_check_retry({'proxy':p.url},'u',proxied=True)
+    out=capsys.readouterr().out
+    assert 'synthetic-user' not in out and 'synthetic-pass' not in out,'retry log leaked synthetic proxy credential'
