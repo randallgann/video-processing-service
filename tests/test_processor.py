@@ -15,13 +15,26 @@ CAPTIONS = {'segments': [{'text': 'Spoken Words: hi', 'metadata': {}}], 'languag
 
 
 class FakeMessage:
-    def __init__(self, payload, message_id='msg-1'):
+    def __init__(self, payload, message_id='msg-1', delivery_attempt=None):
         self.message_id = message_id
         self.data = json.dumps(payload).encode('utf-8')
+        self.delivery_attempt = delivery_attempt
         self.acks = 0
+        self.nacks = 0
 
     def ack(self):
         self.acks += 1
+
+    def nack(self):
+        self.nacks += 1
+
+
+@pytest.fixture(autouse=True)
+def fresh_attempt_counter(processor):
+    """The in-process failed-delivery counter is module state; the processor module is per session."""
+    processor._failed_deliveries.clear()
+    yield
+    processor._failed_deliveries.clear()
 
 
 def request(**overrides):
@@ -76,8 +89,8 @@ def worker(processor, monkeypatch, tmp_path):
     monkeypatch.setattr(processor, 'publish_progress', lambda **kw: calls['progress'].append(kw))
     monkeypatch.setattr(processor, 'publish_completion_result', lambda **kw: calls['completions'].append(kw))
 
-    def run(payload):
-        message = FakeMessage(payload)
+    def run(payload, **message_kwargs):
+        message = FakeMessage(payload, **message_kwargs)
         processor.process_message(message)
         return message
 
@@ -158,6 +171,8 @@ def test_over_duration_cap_fails_and_acks(worker, processor, monkeypatch):
     monkeypatch.setattr(processor, 'MAX_VIDEO_DURATION_SECONDS', 600)
     message = run(request(quality='standard'))
     assert calls['download'] == 0 and calls['fetch_captions'] == [] and calls['transcribe'] == 0
+    assert message.nacks == 0
+    assert calls['progress'][-1]['final'] is True
     assert message.acks == 1
     [completion] = calls['completions']
     assert completion['status'] == 'failed'
@@ -242,17 +257,152 @@ def test_bot_check_download_failure_is_acked(worker):
     state['captions'] = None
     state['download_error'] = "Failed to download video: ERROR: Sign in to confirm you're not a bot"
     message = run(request())
-    assert message.acks == 1
+    assert message.acks == 1 and message.nacks == 0
     assert calls['completions'][0]['status'] == 'failed'
+    assert calls['progress'][-1]['final'] is True
 
 
-def test_transient_download_failure_is_still_redelivered(worker):
+TRANSIENT = 'Failed to download video: ERROR: timed out'
+
+
+def transient_failure(worker):
     run, calls, state = worker
     state['captions'] = None
-    state['download_error'] = 'Failed to download video: ERROR: timed out'
+    state['download_error'] = TRANSIENT
+    return run, calls
+
+
+# Issue #17: a retryable failure with attempts left is nacked (the slot frees), with no completion result
+def test_transient_download_failure_is_nacked_for_redelivery(worker, processor):
+    run, calls = transient_failure(worker)
     message = run(request())
-    assert message.acks == 0
-    assert calls['completions'][0]['status'] == 'failed'
+    assert (message.acks, message.nacks) == (0, 1)
+    assert calls['completions'] == [], 'no completion result for an interim failure'
+    failed = calls['progress'][-1]
+    assert failed['status'] == 'failed' and failed['error'] == TRANSIENT
+    assert (failed['final'], failed['attempt'], failed['attempt_limit']) == (False, 1, 5)
+    assert failed['current_stage'] == 'retrying'
+    assert processor._failed_deliveries == {'msg-1': 1}
+
+
+def test_fifth_transient_failure_of_a_message_is_final(worker, processor):
+    run, calls = transient_failure(worker)
+    messages = [run(request()) for _ in range(5)]
+    assert [(m.acks, m.nacks) for m in messages] == [(0, 1)] * 4 + [(1, 0)]
+    assert [p['attempt'] for p in calls['progress'] if p['status'] == 'failed'] == [1, 2, 3, 4, 5]
+    assert [p['final'] for p in calls['progress'] if p['status'] == 'failed'] == [False] * 4 + [True]
+    [completion] = calls['completions']
+    assert completion['status'] == 'failed' and completion['error'] == TRANSIENT
+    assert calls['progress'][-1]['current_stage'] == 'error'
+    assert processor._failed_deliveries == {}, 'the counter entry is cleared on ack'
+
+
+def test_attempts_are_counted_per_message_id(worker, processor):
+    run, calls = transient_failure(worker)
+    for _ in range(4):
+        run(request(), message_id='msg-a')
+    message = run(request(), message_id='msg-b')
+    assert message.nacks == 1 and calls['progress'][-1]['attempt'] == 1
+    assert processor._failed_deliveries == {'msg-a': 4, 'msg-b': 1}
+
+
+def test_pubsub_delivery_attempt_wins_over_the_counter(worker, processor):
+    run, calls = transient_failure(worker)
+    message = run(request(), delivery_attempt=2)
+    assert (message.acks, message.nacks) == (0, 1)
+    assert (calls['progress'][-1]['final'], calls['progress'][-1]['attempt']) == (False, 2)
+    assert processor._failed_deliveries == {}, 'the counter is not used when Pub/Sub counts'
+
+    message = run(request(), delivery_attempt=5)
+    assert (message.acks, message.nacks) == (1, 0)
+    assert (calls['progress'][-1]['final'], calls['progress'][-1]['attempt']) == (True, 5)
+    [completion] = calls['completions']
+    assert completion['status'] == 'failed'
+
+
+def test_max_delivery_attempts_comes_from_the_env(worker, monkeypatch):
+    run, calls = transient_failure(worker)
+    monkeypatch.setenv('YTDLP_MAX_DELIVERY_ATTEMPTS', '2')
+    first, second = run(request()), run(request())
+    assert (first.nacks, second.acks) == (1, 1)
+    assert calls['progress'][-1]['attempt_limit'] == 2
+
+
+@pytest.mark.parametrize('value, expected', [('', 5), ('  ', 5), ('3', 3), ('1', 1), ('0', 5), ('-2', 5), ('five', 5)])
+def test_max_delivery_attempts_parse(processor, monkeypatch, caplog, value, expected):
+    monkeypatch.setenv('YTDLP_MAX_DELIVERY_ATTEMPTS', value)
+    with caplog.at_level(logging.WARNING):
+        assert processor.max_delivery_attempts() == expected
+    warned = 'YTDLP_MAX_DELIVERY_ATTEMPTS' in caplog.text
+    assert warned == (value.strip() not in ('', '3', '1'))
+
+
+def test_failure_decision_is_logged(worker, caplog):
+    run, _ = transient_failure(worker)
+    with caplog.at_level(logging.INFO):
+        run(request())
+    assert 'attempt 1/5, final=False, action=nack' in caplog.text
+
+
+def test_failure_after_transcription_is_final_and_acked(worker, processor, monkeypatch):
+    run, calls, state = worker
+    state['captions'] = None
+
+    def failing_upload(path, bucket, mid):
+        raise Exception('GCS upload failed')
+
+    monkeypatch.setattr(processor, 'upload_results', failing_upload)
+    message = run(request(), delivery_attempt=1)
+    assert calls['transcribe'] == 1
+    assert (message.acks, message.nacks) == (1, 0)
+    assert calls['progress'][-1]['final'] is True
+    assert calls['completions'][-1]['status'] == 'failed'
+
+
+def test_success_after_a_retry_clears_the_counter(worker, processor):
+    run, calls, state = worker
+    state['captions'] = None
+    state['download_error'] = TRANSIENT
+    run(request())
+    assert processor._failed_deliveries == {'msg-1': 1}
+    state['download_error'] = None
+    message = run(request())
+    assert (message.acks, message.nacks) == (1, 0)
+    assert calls['completions'][-1]['status'] == 'completed'
+    assert processor._failed_deliveries == {}
+
+
+def test_counter_is_bounded(processor, monkeypatch):
+    monkeypatch.setattr(processor, '_FAILED_DELIVERIES_MAX_ENTRIES', 3)
+    for i in range(5):
+        processor.delivery_attempt_for(FakeMessage({}, message_id=f'm{i}'))
+    assert list(processor._failed_deliveries) == ['m2', 'm3', 'm4']
+
+
+def test_progress_message_carries_final_and_attempt_only_when_given(processor, monkeypatch):
+    published = []
+
+    class FakeFuture:
+        def result(self):
+            return 'id'
+
+    class FakePublisher:
+        def topic_path(self, project, topic):
+            return f'projects/{project}/topics/{topic}'
+
+        def publish(self, topic, data):
+            published.append(json.loads(data))
+            return FakeFuture()
+
+    monkeypatch.setattr(processor, 'PROGRESS_TOPIC_ID', 'progress')
+    monkeypatch.setattr(processor.pubsub_v1, 'PublisherClient', FakePublisher)
+    common = dict(message_id='m', video_url=URL, progress_percent=0, current_stage='error',
+                  stage_progress_percent=0, start_time=0)
+    processor.publish_progress(status='processing', **common)
+    processor.publish_progress(status='failed', error='x', final=False, attempt=2, attempt_limit=5, **common)
+    plain, interim = published
+    assert plain['final'] is True and 'attempt' not in plain and 'max_attempts' not in plain
+    assert (interim['final'], interim['attempt'], interim['max_attempts']) == (False, 2, 5)
 
 
 # Completion message shape: T2 fields only when not None
@@ -278,7 +428,8 @@ def test_completion_message_adds_t2_fields_only_when_set(processor, monkeypatch)
                                         transcript_source='captions', language='en', duration_seconds=0,
                                         title='T', channel_title=None)
     legacy, rich = published
-    assert set(legacy) == {'message_id', 'video_id', 'video_url', 'status', 'timestamp', 'error'}
+    assert set(legacy) == {'message_id', 'video_id', 'video_url', 'status', 'timestamp', 'error', 'final'}
+    assert legacy['final'] is True and rich['final'] is True
     assert {k: rich[k] for k in ('transcript_source', 'language', 'duration_seconds', 'title')} == {
         'transcript_source': 'captions', 'language': 'en', 'duration_seconds': 0, 'title': 'T'}
     assert 'channel_title' not in rich
@@ -409,7 +560,8 @@ def test_age_gated_download_failure_is_failed_and_acked(worker):
     state['download_error'] = ("Failed to download video: ERROR: [youtube] Tq92D6wQ1mg: Sign in to confirm your age. "
                                "This video may be inappropriate for some users.")
     message = run(request())
-    assert message.acks == 1
+    assert message.acks == 1 and message.nacks == 0
+    assert calls['progress'][-1]['final'] is True
     [completion] = calls['completions']
     assert completion['status'] == 'failed'
     assert 'confirm your age' in completion['error']
@@ -424,7 +576,8 @@ def test_permanent_probe_failure_fails_and_acks_without_downloading(worker, proc
 
     monkeypatch.setattr(processor, 'probe_video', gated_probe)
     message = run(request())
-    assert message.acks == 1
+    assert message.acks == 1 and message.nacks == 0
+    assert calls['progress'][-1]['final'] is True
     assert calls['download'] == 0 and calls['fetch_captions'] == []
     assert calls['completions'][0]['status'] == 'failed'
 

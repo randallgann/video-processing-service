@@ -69,6 +69,10 @@ HTTP_PORT = int(os.environ.get('PORT', '8080'))
 METRICS_PORT = int(os.environ.get('METRICS_PORT', '9090'))
 # Backstop for requests that skipped rag-widget's quote-time cap (INGEST_MAX_VIDEO_SECONDS).
 MAX_VIDEO_DURATION_SECONDS = int(os.environ.get('MAX_VIDEO_DURATION_SECONDS', '14400'))
+
+# Issue #17: a retryable failure is nacked for redelivery until the message's attempt
+# reaches this, then it is final (failed + ack). See max_delivery_attempts().
+DEFAULT_MAX_DELIVERY_ATTEMPTS = 5
 # Request `quality`: standard = captions first, Whisper fallback; whisper = Whisper only.
 QUALITIES = ('standard', 'whisper')
 
@@ -962,7 +966,8 @@ def extract_video_id(video_url):
 
 def publish_progress(message_id, video_url, status, progress_percent,
                     current_stage, stage_progress_percent,
-                    start_time, error=None, db_video_id=None):
+                    start_time, error=None, db_video_id=None,
+                    final=True, attempt=None, attempt_limit=None):
     """
     Publish progress update to Pub/Sub
 
@@ -976,6 +981,10 @@ def publish_progress(message_id, video_url, status, progress_percent,
         start_time: Processing start time
         error: Error message, if any
         db_video_id: DB UUID from request payload (echoed as video_id when present)
+        final: False only on a retryable failure that will be redelivered (issue #17); the
+            API service refunds a failed video only when this is true
+        attempt, attempt_limit: the delivery attempt of a failure and the attempt budget, sent as
+            attempt / max_attempts and added only when not None
     """
     if not PROGRESS_TOPIC_ID:
         logger.info("Progress reporting disabled (PROGRESS_TOPIC_ID not set)")
@@ -1010,8 +1019,12 @@ def publish_progress(message_id, video_url, status, progress_percent,
             "processing_time_seconds": processing_time_seconds,
             "estimated_time_remaining_seconds": estimated_time_remaining,
             "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
-            "error": error
+            "error": error,
+            "final": final
         }
+        for key, value in (("attempt", attempt), ("max_attempts", attempt_limit)):
+            if value is not None:
+                progress_message[key] = value
         
         # Publish message
         message_json = json.dumps(progress_message)
@@ -1064,7 +1077,9 @@ def publish_completion_result(message_id, video_url, status, transcript_location
             "video_id": video_id,
             "video_url": video_url,
             "status": status,
-            "timestamp": datetime.datetime.utcnow().isoformat() + "Z"
+            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            # A completion result is only ever published for a terminal outcome (issue #17)
+            "final": True
         }
         
         # Add transcript location for successful completions
@@ -1257,6 +1272,55 @@ def write_transcript(work_dir, video_info, final_transcript):
     return result_file_path
 
 
+def max_delivery_attempts():
+    """
+    How many deliveries a retryable failure gets, from YTDLP_MAX_DELIVERY_ATTEMPTS (issue #17).
+    Unset or empty -> 5; anything that is not a positive integer -> 5 with a warning, so a typo
+    never stops a worker.
+    """
+    raw = os.environ.get('YTDLP_MAX_DELIVERY_ATTEMPTS', '').strip()
+    if not raw:
+        return DEFAULT_MAX_DELIVERY_ATTEMPTS
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        logger.warning(f"YTDLP_MAX_DELIVERY_ATTEMPTS={raw!r} is not a positive integer; "
+                       f"using {DEFAULT_MAX_DELIVERY_ATTEMPTS}")
+        return DEFAULT_MAX_DELIVERY_ATTEMPTS
+    return value
+
+
+# Failed deliveries per message id, for subscriptions without a dead-letter policy (there
+# message.delivery_attempt is None). Bounded; an entry is dropped when its message is acked.
+# A worker restart resets it, so the budget restarts at 1 (a dead-letter policy removes that).
+_failed_deliveries = {}
+_FAILED_DELIVERIES_MAX_ENTRIES = 1000
+
+
+def delivery_attempt_for(message):
+    """
+    The attempt number of this delivery, counted when it fails: Pub/Sub's own
+    message.delivery_attempt when the subscription provides it, else the in-process counter.
+    """
+    attempt = getattr(message, 'delivery_attempt', None)
+    if attempt is not None:
+        return attempt
+    message_id = message.message_id
+    attempt = _failed_deliveries.pop(message_id, 0) + 1
+    _failed_deliveries[message_id] = attempt  # re-inserted: newest last
+    while len(_failed_deliveries) > _FAILED_DELIVERIES_MAX_ENTRIES:
+        del _failed_deliveries[next(iter(_failed_deliveries))]
+    return attempt
+
+
+def ack_message(message):
+    """Ack, and forget the message's failed-delivery count."""
+    _failed_deliveries.pop(getattr(message, 'message_id', None), None)
+    message.ack()
+
+
 def process_message(message):
     """
     Process a single Pub/Sub message
@@ -1299,7 +1363,7 @@ def process_message(message):
         if not video_url:
             logger.error("Message missing video_url or video.url")
             logger.error(f"Message data: {data}")
-            message.ack()  # Acknowledge to avoid reprocessing the same invalid message
+            ack_message(message)  # Acknowledge to avoid reprocessing the same invalid message
             return
         
         # Get model type from message data or use default
@@ -1395,7 +1459,7 @@ def process_message(message):
                     title=captions["title"] or video_info["title"] or None,
                     channel_title=captions["channel_title"] or channel_title,
                 )
-                message.ack()
+                ack_message(message)
                 logger.info(f"Successfully processed message {message_id} from {captions['kind']} captions "
                             f"({captions['language']}); results at {result_url}")
                 return
@@ -1706,7 +1770,7 @@ def process_message(message):
         )
         
         # Acknowledge the message
-        message.ack()
+        ack_message(message)
         logger.info(f"Successfully processed message {message_id}")
         logger.info(f"Results available at: {result_url}")
         logger.info(f"Audio chunks cleanup: {deleted_count} files removed from GCS")
@@ -1715,41 +1779,55 @@ def process_message(message):
         logger.error(f"Error processing message: {e}")
         # Report error progress
         if video_url and message_id:
+            # Issue #17: a retryable failure with attempts left is nacked so the slot frees and
+            # Pub/Sub redelivers it; the API service sees final=False and does not refund. Every
+            # other failure is final: failed result, ack. Don't retry if a retry cannot succeed,
+            # or once transcription ran (Whisper was paid for).
+            attempt = delivery_attempt_for(message)
+            max_attempts = max_delivery_attempts()
+            if isinstance(e, NonRetryableError):
+                final, reason = True, "non-retryable failure"
+            elif 'transcription_results' in locals():
+                final, reason = True, "failed after transcription"
+            elif attempt >= max_attempts:
+                final, reason = True, "out of attempts"
+            else:
+                final, reason = False, "retryable failure"
+            logger.info(f"Failure of message {message_id}: attempt {attempt}/{max_attempts}, final={final}, "
+                        f"action={'ack' if final else 'nack'} ({reason})")
+
             publish_progress(
                 message_id=message_id,
                 video_url=video_url,
                 status="failed",
                 progress_percent=0,
-                current_stage="error",
+                current_stage="error" if final else "retrying",
                 stage_progress_percent=0,
                 start_time=start_time,
                 error=str(e),
-                db_video_id=db_video_id
-            )
-            
-            # Publish failure result for memory import processing
-            publish_completion_result(
-                message_id=message_id,
-                video_url=video_url,
-                status="failed",
-                error=str(e),
                 db_video_id=db_video_id,
-                correlation=correlation
+                final=final,
+                attempt=attempt,
+                attempt_limit=max_attempts
             )
-            
-            # Don't retry if we made significant progress, or if a retry cannot succeed
-            if isinstance(e, NonRetryableError):
-                logger.warning("Non-retryable failure, acknowledging message to avoid retry")
-                message.ack()
-            elif 'transcription_results' in locals():
-                logger.warning("Error occurred after significant processing, acknowledging message to avoid retry")
-                message.ack()
+
+            if final:
+                # Publish failure result for memory import processing
+                publish_completion_result(
+                    message_id=message_id,
+                    video_url=video_url,
+                    status="failed",
+                    error=str(e),
+                    db_video_id=db_video_id,
+                    correlation=correlation
+                )
+                ack_message(message)
             else:
-                logger.info("Not acknowledging message to allow redelivery")
+                message.nack()
         else:
             # If we can't even extract the message ID and URL, just ack the message
             logger.warning("Couldn't extract message_id or video_url, acknowledging to prevent infinite retry")
-            message.ack()
+            ack_message(message)
     finally:
         # Cleanup temp directories
         for dir_path in temp_dirs:
